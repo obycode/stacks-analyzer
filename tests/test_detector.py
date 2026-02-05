@@ -619,6 +619,8 @@ class TestDetector(unittest.TestCase):
         recent = snapshot["recent_proposals"]
         rejected_row = next(row for row in recent if row["signature_hash"] == rejected_hash)
         self.assertEqual(rejected_row["status"], "rejected")
+        self.assertFalse(rejected_row["is_open"])
+        self.assertEqual(snapshot["open_proposals_count"], 0)
 
     def test_signer_block_response_rejection_is_info(self) -> None:
         detector = Detector(

@@ -540,6 +540,14 @@ class Detector:
                     message=message,
                     ts=event.ts,
                 )
+                if signature_hash and not self._is_recently_closed(signature_hash, event.ts):
+                    alerts.extend(
+                        self._finalize_proposal(
+                            signature_hash,
+                            event.ts,
+                            finalize_reason="rejected",
+                        )
+                    )
 
         return alerts
 
@@ -707,7 +715,12 @@ class Detector:
                     ts=ts,
                 )
 
-    def _finalize_proposal(self, signature_hash: str, ts: float) -> List[Alert]:
+    def _finalize_proposal(
+        self,
+        signature_hash: str,
+        ts: float,
+        finalize_reason: Optional[str] = None,
+    ) -> List[Alert]:
         alerts: List[Alert] = []
         state = self.proposals.pop(signature_hash, None)
         if state is None:
@@ -719,18 +732,19 @@ class Detector:
             self.completed_with_threshold += 1
         self.closed_proposals[signature_hash] = ts
 
-        tracked_signers = set(self.signer_participation.keys())
-        tracked_signers.update(self.seen_signers)
-        tracked_signers.update(state.signers)
-        for pubkey in tracked_signers:
-            self.signer_participation[pubkey].append(pubkey in state.signers)
-        self.proposal_reject_reasons.pop(signature_hash, None)
+        if finalize_reason != "rejected":
+            tracked_signers = set(self.signer_participation.keys())
+            tracked_signers.update(self.seen_signers)
+            tracked_signers.update(state.signers)
+            for pubkey in tracked_signers:
+                self.signer_participation[pubkey].append(pubkey in state.signers)
+            self.proposal_reject_reasons.pop(signature_hash, None)
         self._record_proposal_activity(
             signature_hash=signature_hash,
             state=state,
             ts=ts,
             is_open=False,
-            final_state="finalized",
+            final_state=finalize_reason or "finalized",
         )
 
         return alerts
@@ -1336,6 +1350,8 @@ class Detector:
     ) -> str:
         if threshold_seen:
             return "approved"
+        if isinstance(final_state, str) and final_state == "rejected":
+            return "rejected"
         if isinstance(final_state, str) and final_state == "timed_out":
             return "rejected"
         if reject_reason:
