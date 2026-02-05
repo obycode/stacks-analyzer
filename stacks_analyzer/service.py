@@ -1,0 +1,293 @@
+from collections import deque
+import json
+import queue
+import signal
+import threading
+import time
+from typing import Any, Deque, Dict, Optional, Set
+
+from .config import ServiceConfig
+from .detector import Alert, Detector
+from .events import LogParser, extract_timestamp
+from .sources import spawn_source_threads
+from .telegram import TelegramNotifier
+from .web import DashboardServer
+
+
+class MonitoringService:
+    def __init__(self, config: ServiceConfig) -> None:
+        self.config = config
+        signer_names = self._load_signer_names(config.signer_names_path)
+        self.detector = Detector(config.detector, signer_names=signer_names)
+        self.parser = LogParser()
+        self.stop_event = threading.Event()
+        self.queue: "queue.Queue[tuple]" = queue.Queue(maxsize=10000)
+        self.finished_sources = 0
+        self.expected_sources = 0
+        self.latest_event_ts: Optional[float] = None
+        self.replay_clock_enabled = (
+            config.mode == "files" and config.from_beginning and not config.run_once
+        )
+        self.replay_wall_base_ts: float = time.time()
+        self.replay_event_base_ts: Optional[float] = None
+        self.latest_event_ts_by_source: Dict[str, float] = {}
+        self.replay_sources: Set[str] = set()
+        if config.mode == "files":
+            if config.node_log_path:
+                self.replay_sources.add("node")
+            if config.signer_log_path:
+                self.replay_sources.add("signer")
+        self.state_lock = threading.Lock()
+        self.recent_alerts: Deque[Dict[str, Any]] = deque(maxlen=200)
+        self.recent_reports: Deque[Dict[str, Any]] = deque(maxlen=200)
+
+        self.notifier: Optional[TelegramNotifier] = None
+        if config.telegram.enabled:
+            self.notifier = TelegramNotifier(config.telegram.token, config.telegram.chat_id)
+
+        self.dashboard_server: Optional[DashboardServer] = None
+        if config.web.enabled:
+            self.dashboard_server = DashboardServer(
+                host=config.web.host,
+                port=config.web.port,
+                state_provider=self._dashboard_state,
+            )
+
+        signal.signal(signal.SIGINT, self._handle_stop)
+        signal.signal(signal.SIGTERM, self._handle_stop)
+
+    def run(self) -> int:
+        try:
+            if self.dashboard_server is not None:
+                try:
+                    self.dashboard_server.start()
+                    print(
+                        "[INFO] Dashboard listening on http://%s:%d"
+                        % (self.config.web.host, self.config.web.port),
+                        flush=True,
+                    )
+                except OSError as exc:
+                    print(
+                        "[WARN] Dashboard disabled (failed to bind %s:%d): %s"
+                        % (self.config.web.host, self.config.web.port, exc),
+                        flush=True,
+                    )
+                    self.dashboard_server = None
+
+            if self.config.mode == "files" and self.config.run_once:
+                return self._run_files_once_merged()
+
+            self.expected_sources = spawn_source_threads(
+                mode=self.config.mode,
+                node_log_path=self.config.node_log_path,
+                signer_log_path=self.config.signer_log_path,
+                node_journal_unit=self.config.node_journal_unit,
+                signer_journal_unit=self.config.signer_journal_unit,
+                out_queue=self.queue,
+                stop_event=self.stop_event,
+                from_beginning=self.config.from_beginning,
+                run_once=self.config.run_once,
+                poll_interval_seconds=self.config.poll_interval_seconds,
+            )
+
+            if self.expected_sources == 0:
+                raise RuntimeError("No log sources configured.")
+
+            while not self.stop_event.is_set():
+                try:
+                    self._drain_queue_once()
+                except queue.Empty:
+                    pass
+                self._run_periodic()
+
+                if self.config.run_once and self.finished_sources >= self.expected_sources:
+                    # Flush any final queued lines and emit a final report.
+                    while True:
+                        try:
+                            self._drain_queue_once(wait_timeout=0.0)
+                        except queue.Empty:
+                            break
+                    self._run_periodic(force_report=True)
+                    self.stop_event.set()
+
+            return 0
+        finally:
+            if self.dashboard_server is not None:
+                self.dashboard_server.stop()
+
+    def _run_files_once_merged(self) -> int:
+        node_handle = (
+            open(self.config.node_log_path, "r", encoding="utf-8", errors="replace")
+            if self.config.node_log_path
+            else None
+        )
+        signer_handle = (
+            open(self.config.signer_log_path, "r", encoding="utf-8", errors="replace")
+            if self.config.signer_log_path
+            else None
+        )
+        try:
+            node_line = node_handle.readline() if node_handle else ""
+            signer_line = signer_handle.readline() if signer_handle else ""
+
+            while node_line or signer_line:
+                if node_line and not signer_line:
+                    self._process_line("node", node_line)
+                    node_line = node_handle.readline() if node_handle else ""
+                elif signer_line and not node_line:
+                    self._process_line("signer", signer_line)
+                    signer_line = signer_handle.readline() if signer_handle else ""
+                else:
+                    node_ts = extract_timestamp(node_line)
+                    signer_ts = extract_timestamp(signer_line)
+                    if node_ts <= signer_ts:
+                        self._process_line("node", node_line)
+                        node_line = node_handle.readline() if node_handle else ""
+                    else:
+                        self._process_line("signer", signer_line)
+                        signer_line = signer_handle.readline() if signer_handle else ""
+
+                self._run_periodic()
+
+            self._run_periodic(force_report=True)
+            return 0
+        finally:
+            if node_handle:
+                node_handle.close()
+            if signer_handle:
+                signer_handle.close()
+
+    def _drain_queue_once(self, wait_timeout: float = 1.0) -> None:
+        source, line = self.queue.get(timeout=wait_timeout)
+        if line is None:
+            self.finished_sources += 1
+            return
+
+        self._process_line(source, line)
+
+    def _process_line(self, source: str, line: str) -> None:
+        with self.state_lock:
+            self.detector.process_line(source)
+            events = self.parser.parse_line(source, line)
+            alert_batch = []
+            for event in events:
+                if self.latest_event_ts is None:
+                    self.latest_event_ts = event.ts
+                else:
+                    self.latest_event_ts = max(self.latest_event_ts, event.ts)
+                previous_source_ts = self.latest_event_ts_by_source.get(source)
+                if previous_source_ts is None:
+                    self.latest_event_ts_by_source[source] = event.ts
+                else:
+                    self.latest_event_ts_by_source[source] = max(
+                        previous_source_ts, event.ts
+                    )
+                if self.replay_clock_enabled and self.replay_event_base_ts is None:
+                    self.replay_event_base_ts = event.ts
+                alert_batch.extend(self.detector.process_event(event))
+        self._publish_alerts(alert_batch)
+
+    def _run_periodic(self, force_report: bool = False) -> None:
+        now = self._state_now()
+        with self.state_lock:
+            if self.detector.start_ts > now:
+                self.detector.start_ts = now
+            alerts, report = self.detector.tick(now=now)
+            if force_report and report is None:
+                report = self.detector.build_report(now)
+        self._publish_alerts(alerts)
+
+        if report:
+            with self.state_lock:
+                self.recent_reports.append({"ts": now, "report": report})
+            print(report, flush=True)
+            self._write_report(report)
+            if self.notifier and self.config.telegram.send_reports:
+                self.notifier.send(report)
+
+    def _write_report(self, report: str) -> None:
+        if not self.config.report_output_path:
+            return
+        with open(self.config.report_output_path, "a", encoding="utf-8") as handle:
+            handle.write(report)
+            handle.write("\n")
+
+    def _publish_alerts(self, alerts: list) -> None:
+        for alert in alerts:
+            self._publish_alert(alert)
+
+    def _publish_alert(self, alert: Alert) -> None:
+        with self.state_lock:
+            self.recent_alerts.append(
+                {
+                    "ts": alert.ts,
+                    "severity": alert.severity,
+                    "key": alert.key,
+                    "message": alert.message,
+                }
+            )
+        rendered = "[ALERT][%s] %s" % (alert.severity.upper(), alert.message)
+        print(rendered, flush=True)
+        if self.notifier:
+            self.notifier.send(rendered)
+
+    def _state_now(self) -> float:
+        now = time.time()
+        if self.config.run_once and self.latest_event_ts is not None:
+            now = self.latest_event_ts
+        elif self.replay_clock_enabled and self.replay_event_base_ts is not None:
+            replay_now = self.replay_event_base_ts + (time.time() - self.replay_wall_base_ts)
+            source_ts_values = [
+                self.latest_event_ts_by_source[source]
+                for source in self.replay_sources
+                if source in self.latest_event_ts_by_source
+            ]
+            if source_ts_values:
+                # Guard against one source getting far ahead while the other backlog is still
+                # being replayed; anomaly timers should advance at the slowest active source.
+                replay_progress_ts = min(source_ts_values)
+                now = max(replay_now, replay_progress_ts)
+            elif self.latest_event_ts is not None:
+                now = max(replay_now, self.latest_event_ts)
+            else:
+                now = replay_now
+        return now
+
+    def _dashboard_state(self) -> Dict[str, Any]:
+        now = self._state_now()
+        with self.state_lock:
+            if self.detector.start_ts > now:
+                self.detector.start_ts = now
+            state = self.detector.snapshot(now=now)
+            state["recent_alerts"] = list(self.recent_alerts)
+            state["recent_reports"] = list(self.recent_reports)
+        return state
+
+    def _handle_stop(self, signum: int, _frame: object) -> None:
+        _ = signum
+        self.stop_event.set()
+
+    def _load_signer_names(self, path: Optional[str]) -> Dict[str, str]:
+        if not path:
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, dict):
+                print(
+                    "[WARN] signer names file must contain a JSON object (pubkey->name): %s"
+                    % path,
+                    flush=True,
+                )
+                return {}
+            output: Dict[str, str] = {}
+            for key, value in payload.items():
+                if isinstance(key, str) and isinstance(value, str):
+                    output[key.strip()] = value.strip()
+            return output
+        except (OSError, ValueError) as exc:
+            print(
+                "[WARN] failed to load signer names from %s: %s" % (path, exc),
+                flush=True,
+            )
+            return {}

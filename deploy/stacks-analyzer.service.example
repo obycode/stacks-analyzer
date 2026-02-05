@@ -1,0 +1,14 @@
+[Unit]
+Description=Stacks Analyzer Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=stacks
+WorkingDirectory=/opt/stacks-analyzer
+ExecStart=/usr/bin/python3 -m stacks_analyzer --config /etc/stacks-analyzer/config.json
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

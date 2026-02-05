@@ -1,0 +1,35 @@
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tooling caches/reports
+.pytest_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Environment/secrets
+.env
+.env.*
+
+# Local editor/OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local runtime/config files
+config.obynuc.json
+config.local-sample-web.json
+signer_names.json

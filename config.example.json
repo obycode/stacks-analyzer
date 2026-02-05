@@ -1,0 +1,35 @@
+{
+  "mode": "files",
+  "node_log_path": "sample_logs/node.log",
+  "signer_log_path": "sample_logs/signer.log",
+  "from_beginning": true,
+  "run_once": true,
+  "poll_interval_seconds": 0.1,
+  "report_output_path": null,
+  "signer_names_path": "signer_names.example.json",
+  "detector": {
+    "node_stall_seconds": 90,
+    "signer_stall_seconds": 120,
+    "proposal_timeout_seconds": 45,
+    "stale_chunk_window_seconds": 60,
+    "stale_chunk_threshold": 250,
+    "report_interval_seconds": 60,
+    "alert_cooldown_seconds": 300,
+    "large_signer_min_samples": 10,
+    "large_signer_top_n": 3,
+    "large_signer_window": 30,
+    "large_signer_min_participation": 0.5,
+    "closed_proposal_retention_seconds": 600
+  },
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chat_id": "",
+    "send_reports": false
+  },
+  "web": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8787
+  }
+}
