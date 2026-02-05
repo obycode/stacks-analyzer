@@ -76,6 +76,7 @@ DASHBOARD_HTML = """<!doctype html>
       border-radius: 14px;
       backdrop-filter: blur(8px);
       padding: 14px;
+      margin-bottom: 12px;
     }
     .label {
       font-size: 12px;
@@ -135,9 +136,99 @@ DASHBOARD_HTML = """<!doctype html>
       font: inherit;
     }
     .hash-btn:hover { border-color: rgba(186, 230, 253, 0.45); }
+    .proposal-row-in-progress {
+      background: rgba(56, 189, 248, 0.1);
+    }
+    .proposal-row-rejected {
+      background: rgba(239, 68, 68, 0.1);
+    }
+    .proposal-status {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      border: 1px solid var(--line);
+    }
+    .proposal-status-in-progress {
+      color: #bae6fd;
+      background: rgba(56, 189, 248, 0.18);
+      border-color: rgba(56, 189, 248, 0.45);
+    }
+    .proposal-status-approved {
+      color: #bbf7d0;
+      background: rgba(34, 197, 94, 0.16);
+      border-color: rgba(34, 197, 94, 0.35);
+    }
+    .proposal-status-rejected {
+      color: #fecaca;
+      background: rgba(239, 68, 68, 0.18);
+      border-color: rgba(239, 68, 68, 0.4);
+    }
+    .proposal-status-unknown {
+      color: #cbd5e1;
+      background: rgba(148, 163, 184, 0.15);
+      border-color: rgba(148, 163, 184, 0.35);
+    }
+
+    .sortition-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .round {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.45);
+      padding: 10px;
+    }
+    .round-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .badge {
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      border: 1px solid var(--line);
+    }
+    .badge-winner {
+      color: #bbf7d0;
+      background: rgba(34, 197, 94, 0.16);
+      border-color: rgba(34, 197, 94, 0.35);
+    }
+    .badge-null {
+      color: #fde68a;
+      background: rgba(245, 158, 11, 0.16);
+      border-color: rgba(245, 158, 11, 0.35);
+    }
+    .commit-list {
+      display: grid;
+      gap: 6px;
+    }
+    .commit {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 8px;
+      font-size: 12px;
+      background: rgba(2, 6, 23, 0.45);
+    }
+    .commit-winner {
+      border-color: rgba(34, 197, 94, 0.45);
+      background: rgba(34, 197, 94, 0.08);
+    }
+
     @media (max-width: 980px) {
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .two { grid-template-columns: 1fr; }
+      .sortition-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -152,21 +243,36 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
     </div>
 
-    <div class="card" style="margin-bottom: 12px;">
-      <div class="panel-title">Open Proposals</div>
+    <div class="grid">
+      <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">-</div></div>
+      <div class="card"><div class="label">Node Tip Age</div><div class="value" id="tipAge">-</div></div>
+      <div class="card"><div class="label">Signer Proposal Age</div><div class="value" id="proposalAge">-</div></div>
+      <div class="card"><div class="label">Avg Block Interval</div><div class="value" id="avgBlockInterval">-</div></div>
+    </div>
+
+    <div class="card">
+      <div class="panel-title">Recent Proposals (Latest 5)</div>
       <table>
         <thead>
-          <tr><th>Signature Hash</th><th>Block Height</th><th>Age</th><th>Max Seen</th><th>Threshold</th></tr>
+          <tr><th>Signature Hash</th><th>Status</th><th>Block Height</th><th>Age</th><th>Max Seen</th><th>Threshold</th></tr>
         </thead>
         <tbody id="proposalsBody"></tbody>
       </table>
     </div>
 
-    <div class="grid">
-      <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">-</div></div>
-      <div class="card"><div class="label">Node Tip Age</div><div class="value" id="tipAge">-</div></div>
-      <div class="card"><div class="label">Signer Proposal Age</div><div class="value" id="proposalAge">-</div></div>
-      <div class="card"><div class="label">Threshold Ratio</div><div class="value" id="thresholdRatio">-</div></div>
+    <div class="card">
+      <div class="panel-title">Recent Sortitions (Latest 3 Burn Heights)</div>
+      <div class="sortition-grid" id="sortitionCards"></div>
+    </div>
+
+    <div class="card">
+      <div class="panel-title">Last 5 Tenure Extends</div>
+      <table>
+        <thead>
+          <tr><th>Seen</th><th>Kind</th><th>Stacks Block Height</th><th>Burn Height</th><th>Txid</th></tr>
+        </thead>
+        <tbody id="tenureExtendsBody"></tbody>
+      </table>
     </div>
 
     <div class="two">
@@ -215,13 +321,59 @@ DASHBOARD_HTML = """<!doctype html>
         .replaceAll(">", "&gt;");
     }
 
+    function fmtWallClock(ts) {
+      if (ts === null || ts === undefined) return "-";
+      return new Date(ts * 1000).toLocaleString();
+    }
+
+    function shortHash(value, size = 14) {
+      if (value === null || value === undefined) return "-";
+      const text = String(value);
+      if (text.length <= size) return text;
+      return text.slice(0, size) + "...";
+    }
+
+    function renderSortitionCards(rounds) {
+      const container = document.getElementById("sortitionCards");
+      if (!rounds.length) {
+        container.innerHTML = "<div class='round'>No sortition data yet.</div>";
+        return;
+      }
+      container.innerHTML = rounds.map((round) => {
+        const outcome = round.null_miner_won ? "null-miner" : (round.winner_txid ? "winner-selected" : "pending");
+        const badgeClass = round.null_miner_won ? "badge badge-null" : "badge badge-winner";
+        const commits = round.commits || [];
+        const commitHtml = commits.length
+          ? commits.map((item) => {
+              const blockTarget = item.stacks_block_height === null || item.stacks_block_height === undefined
+                ? (item.stacks_block_hash || "-")
+                : String(item.stacks_block_hash || "-") + " (h=" + item.stacks_block_height + ")";
+              const commitClass = item.is_winner ? "commit commit-winner" : "commit";
+              return "<div class='" + commitClass + "'><div class='mono'>" + escapeHtml(item.apparent_sender || "-") + "</div><div class='mono'>commit " + escapeHtml(shortHash(item.commit_txid, 20)) + "</div><div class='mono'>target " + escapeHtml(shortHash(blockTarget, 36)) + "</div></div>";
+            }).join("")
+          : "<div class='commit'>No commits captured for this burn height.</div>";
+        return "<div class='round'><div class='round-head'><span>Burn #" + escapeHtml(round.burn_height) + "</span><span class='" + badgeClass + "'>" + escapeHtml(outcome) + "</span></div><div class='commit-list'>" + commitHtml + "</div></div>";
+      }).join("");
+    }
+
+    function renderTenureExtends(items) {
+      const body = document.getElementById("tenureExtendsBody");
+      if (!items.length) {
+        body.innerHTML = "<tr><td colspan='5'>No tenure extends seen.</td></tr>";
+        return;
+      }
+      body.innerHTML = items.map((item) => {
+        return "<tr><td>" + escapeHtml(fmtWallClock(item.ts)) + "</td><td>" + escapeHtml(item.kind || "-") + "</td><td>" + escapeHtml(item.block_height === null || item.block_height === undefined ? "-" : item.block_height) + "</td><td>" + escapeHtml(item.burn_height === null || item.burn_height === undefined ? "-" : item.burn_height) + "</td><td class='mono'>" + escapeHtml(shortHash(item.txid || "-", 24)) + "</td></tr>";
+      }).join("");
+    }
+
     function render(data) {
       const now = new Date();
       document.getElementById("updated").textContent = "Updated " + now.toLocaleTimeString();
       document.getElementById("uptime").textContent = fmtAge(data.uptime_seconds);
       document.getElementById("tipAge").textContent = fmtAge(data.node_tip_age_seconds);
       document.getElementById("proposalAge").textContent = fmtAge(data.signer_proposal_age_seconds);
-      document.getElementById("thresholdRatio").textContent = (data.threshold_ratio_percent || 0).toFixed(1) + "%";
+      document.getElementById("avgBlockInterval").textContent = fmtAge(data.avg_block_interval_seconds);
       const btc = data.current_bitcoin_block_height;
       const stx = data.current_stacks_block_height;
       document.getElementById("btcHeight").textContent = "BTC: " + (btc === null || btc === undefined ? "-" : btc);
@@ -241,12 +393,40 @@ DASHBOARD_HTML = """<!doctype html>
         return "<tr><td>" + name + "</td><td class='mono'>" + escapeHtml(item.pubkey.slice(0, 18)) + "...</td><td>" + Number(item.estimated_weight || 0).toFixed(1) + "</td><td>" + Number(item.weight_percent_of_total || 0).toFixed(2) + "%</td><td>" + Math.round((item.participation_ratio || 0) * 100) + "% (" + (item.participation_samples || 0) + ")</td></tr>";
       }).join("");
 
-      const proposals = data.open_proposals || [];
-      document.getElementById("proposalsBody").innerHTML = proposals.slice(0, 20).map((item) => {
+      const proposals = data.recent_proposals || data.open_proposals || [];
+      const proposalsBody = document.getElementById("proposalsBody");
+      if (!proposals.length) {
+        proposalsBody.innerHTML = "<tr><td colspan='6'>No proposals seen yet.</td></tr>";
+      } else {
+        proposalsBody.innerHTML = proposals.slice(0, 5).map((item) => {
         const label = escapeHtml(item.signature_hash.slice(0, 14)) + "...";
         const blockHeight = item.block_height === null || item.block_height === undefined ? "-" : item.block_height;
-        return "<tr><td class='mono'><button class='hash-btn mono' data-copy-hash='" + escapeHtml(item.signature_hash) + "' title='Copy full hash'>" + label + "</button></td><td>" + escapeHtml(blockHeight) + "</td><td>" + fmtAge(item.age_seconds) + "</td><td>" + Number(item.max_percent_observed || 0).toFixed(1) + "%</td><td>" + (item.threshold_seen ? "yes" : "no") + "</td></tr>";
+        const status = item.status || (item.is_open ? "in_progress" : "approved");
+        const statusClass = status === "in_progress"
+          ? "proposal-status proposal-status-in-progress"
+          : status === "rejected"
+            ? "proposal-status proposal-status-rejected"
+            : status === "approved"
+              ? "proposal-status proposal-status-approved"
+              : "proposal-status proposal-status-unknown";
+        const rowClass = status === "in_progress"
+          ? "proposal-row-in-progress"
+          : status === "rejected"
+            ? "proposal-row-rejected"
+            : "";
+        const statusLabel = status === "in_progress"
+          ? "in progress"
+          : status === "rejected"
+            ? "rejected"
+            : status === "approved"
+              ? "approved"
+              : "unknown";
+        return "<tr class='" + rowClass + "'><td class='mono'><button class='hash-btn mono' data-copy-hash='" + escapeHtml(item.signature_hash) + "' title='Copy full hash'>" + label + "</button></td><td><span class='" + statusClass + "'>" + statusLabel + "</span></td><td>" + escapeHtml(blockHeight) + "</td><td>" + fmtAge(item.age_seconds) + "</td><td>" + Number(item.max_percent_observed || 0).toFixed(1) + "%</td><td>" + (item.threshold_seen ? "yes" : "no") + "</td></tr>";
       }).join("");
+      }
+
+      renderSortitionCards(data.recent_sortition_details || []);
+      renderTenureExtends(data.recent_tenure_extends || []);
 
       const lines = data.lines || {};
       const counts = [
@@ -271,7 +451,7 @@ DASHBOARD_HTML = """<!doctype html>
         if (!response.ok) throw new Error("bad status");
         const data = await response.json();
         render(data);
-      } catch (err) {
+      } catch (_err) {
         document.getElementById("updated").textContent = "Dashboard disconnected";
       }
     }

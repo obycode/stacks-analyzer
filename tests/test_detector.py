@@ -22,6 +22,28 @@ class TestDetector(unittest.TestCase):
         self.assertIn("node-stall", keys)
         self.assertIn("signer-stall", keys)
 
+    def test_avg_block_interval_from_node_tips(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(source="node", kind="node_tip_advanced", ts=100.0, fields={})
+        )
+        detector.process_event(
+            ParsedEvent(source="node", kind="node_tip_advanced", ts=110.0, fields={})
+        )
+        detector.process_event(
+            ParsedEvent(source="node", kind="node_tip_advanced", ts=125.0, fields={})
+        )
+
+        snapshot = detector.snapshot(now=126.0)
+        self.assertAlmostEqual(snapshot["avg_block_interval_seconds"], 12.5)
+        self.assertEqual(snapshot["avg_block_interval_samples"], 2)
+        self.assertAlmostEqual(snapshot["last_block_interval_seconds"], 15.0)
+
     def test_sample_logs_build_report(self) -> None:
         parser = LogParser()
         detector = Detector(
@@ -238,6 +260,365 @@ class TestDetector(unittest.TestCase):
         signer_row = next(row for row in snapshot["signers"] if row["pubkey"] == pubkey)
         self.assertEqual(signer_row["name"], "Friendly Signer")
         self.assertAlmostEqual(signer_row["weight_percent_of_total"], 10.0)
+
+    def test_snapshot_tracks_miner_consensus_and_tenure_extend(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_winning_block_commit",
+                ts=100.0,
+                fields={
+                    "burn_height": 934988,
+                    "apparent_sender": "bc1qmineraddress",
+                    "miner_pubkey": "0277minerpubkey",
+                    "winning_stacks_block_hash": "aa" * 32,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tenure_notify",
+                ts=101.0,
+                fields={
+                    "consensus_hash": "bb" * 20,
+                    "burn_height": 934988,
+                    "winning_stacks_block_hash": "aa" * 32,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tenure_change",
+                ts=102.0,
+                fields={
+                    "tenure_change_kind": "ExtendAll",
+                    "txid": "cc" * 32,
+                    "origin": "SPVYF6M3FD0738FWDGDMJ84EFMGM38JS0N7DE42K",
+                },
+            )
+        )
+
+        snapshot = detector.snapshot(now=110.0)
+        self.assertEqual(snapshot["current_bitcoin_block_height"], 934988)
+        self.assertEqual(snapshot["current_consensus_hash"], "bb" * 20)
+        self.assertEqual(snapshot["current_consensus_burn_height"], 934988)
+        self.assertEqual(snapshot["current_miner_apparent_sender"], "bc1qmineraddress")
+        self.assertEqual(snapshot["current_miner_pubkey"], "0277minerpubkey")
+        self.assertEqual(snapshot["last_tenure_extend_kind"], "ExtendAll")
+        self.assertEqual(snapshot["last_tenure_extend_txid"], "cc" * 32)
+        self.assertEqual(
+            snapshot["last_tenure_extend_origin"],
+            "SPVYF6M3FD0738FWDGDMJ84EFMGM38JS0N7DE42K",
+        )
+        self.assertEqual(snapshot["last_tenure_extend_age_seconds"], 8.0)
+
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tenure_notify",
+                ts=111.0,
+                fields={
+                    "consensus_hash": "dd" * 20,
+                    "burn_height": 934989,
+                    "winning_stacks_block_hash": "0" * 64,
+                },
+            )
+        )
+        snapshot = detector.snapshot(now=112.0)
+        self.assertEqual(snapshot["current_miner_winning_stacks_block_hash"], "0" * 64)
+        self.assertEqual(snapshot["current_consensus_burn_height"], 934989)
+        self.assertEqual(snapshot["current_miner_apparent_sender"], "bc1qmineraddress")
+        self.assertEqual(snapshot["current_miner_pubkey"], "0277minerpubkey")
+
+    def test_sortition_rounds_and_active_miner_snapshot(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_sortition_winner_selected",
+                ts=100.0,
+                fields={
+                    "burn_height": 934988,
+                    "winner_txid": "aa" * 32,
+                    "winning_stacks_block_hash": "bb" * 32,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_leader_block_commit",
+                ts=101.0,
+                fields={
+                    "burn_height": 934988,
+                    "commit_txid": "11" * 32,
+                    "sortition_position": 100,
+                    "apparent_sender": "bc1qminer1",
+                    "stacks_block_hash": "bb" * 32,
+                    "parent_burn_block": 934987,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_leader_block_commit",
+                ts=101.1,
+                fields={
+                    "burn_height": 934988,
+                    "commit_txid": "aa" * 32,
+                    "sortition_position": 200,
+                    "apparent_sender": "bc1qwinner",
+                    "stacks_block_hash": "bb" * 32,
+                    "parent_burn_block": 934987,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_state_machine_update",
+                ts=102.0,
+                fields={
+                    "burn_block": "cc" * 20,
+                    "burn_height": 934988,
+                    "current_miner_pkh": "pkh123",
+                    "tenure_id": "cc" * 20,
+                    "parent_tenure_id": "dd" * 20,
+                    "parent_tenure_last_block": "ee" * 32,
+                    "parent_tenure_last_block_height": 6319944,
+                },
+            )
+        )
+
+        snapshot = detector.snapshot(now=110.0)
+        self.assertEqual(snapshot["current_miner_apparent_sender"], "bc1qwinner")
+        self.assertEqual(
+            snapshot["last_successful_sortition"]["winner_apparent_sender"],
+            "bc1qwinner",
+        )
+        self.assertEqual(
+            snapshot["last_successful_sortition"]["winner_stacks_block_height"], None
+        )
+        self.assertEqual(len(snapshot["last_successful_sortition_commits"]), 2)
+        self.assertEqual(len(snapshot["miners_since_last_successful_sortition"]), 0)
+        self.assertEqual(len(snapshot["recent_sortition_details"]), 1)
+        self.assertEqual(snapshot["recent_sortition_details"][0]["burn_height"], 934988)
+        self.assertEqual(len(snapshot["recent_sortition_details"][0]["commits"]), 2)
+        self.assertEqual(snapshot["active_miner"]["current_miner_pkh"], "pkh123")
+        self.assertEqual(snapshot["current_consensus_burn_height"], 934988)
+        self.assertEqual(
+            snapshot["active_miner"]["parent_tenure_last_block_height"], 6319944
+        )
+
+    def test_null_miner_round_keeps_last_successful_winner(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_sortition_winner_selected",
+                ts=100.0,
+                fields={
+                    "burn_height": 934982,
+                    "winner_txid": "aa" * 32,
+                    "winning_stacks_block_hash": "bb" * 32,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_leader_block_commit",
+                ts=101.0,
+                fields={
+                    "burn_height": 934982,
+                    "commit_txid": "aa" * 32,
+                    "sortition_position": 10,
+                    "apparent_sender": "bc1qpreviouswinner",
+                    "stacks_block_hash": "bb" * 32,
+                    "parent_burn_block": 934981,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_sortition_winner_rejected",
+                ts=102.0,
+                fields={
+                    "burn_height": 934983,
+                    "rejected_txid": "cc" * 32,
+                    "rejected_stacks_block_hash": "dd" * 32,
+                    "rejection_reason": (
+                        "Null miner defeats block winner due to insufficient commit carryover"
+                    ),
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tenure_notify",
+                ts=103.0,
+                fields={
+                    "consensus_hash": "ee" * 20,
+                    "burn_height": 934983,
+                    "winning_stacks_block_hash": "0" * 64,
+                },
+            )
+        )
+
+        snapshot = detector.snapshot(now=110.0)
+        self.assertEqual(snapshot["current_miner_apparent_sender"], "bc1qpreviouswinner")
+        self.assertEqual(snapshot["last_successful_sortition"]["burn_height"], 934982)
+        self.assertEqual(snapshot["latest_sortition"]["burn_height"], 934983)
+        self.assertTrue(snapshot["latest_sortition"]["null_miner_won"])
+        self.assertIn(
+            "Null miner",
+            str(snapshot["latest_sortition"]["null_miner_reason"]),
+        )
+
+    def test_recent_tenure_extends_tracks_last_five(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        for index in range(6):
+            detector.process_event(
+                ParsedEvent(
+                    source="node",
+                    kind="node_tenure_change",
+                    ts=100.0 + index,
+                    fields={
+                        "tenure_change_kind": "ExtendAll",
+                        "txid": f"tx{index}",
+                        "origin": "SPTEST",
+                        "block_height": 6319900 + index,
+                        "burn_height": 934980 + index,
+                    },
+                )
+            )
+
+        snapshot = detector.snapshot(now=200.0)
+        recent = snapshot["recent_tenure_extends"]
+        self.assertEqual(len(recent), 5)
+        self.assertEqual(recent[0]["txid"], "tx5")
+        self.assertEqual(recent[-1]["txid"], "tx1")
+        self.assertEqual(recent[0]["block_height"], 6319905)
+        self.assertEqual(recent[0]["burn_height"], 934985)
+
+    def test_recent_proposals_include_open_and_closed(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                proposal_timeout_seconds=99999,
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        closed_hash = "closed123"
+        open_hash = "open456"
+
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_proposal",
+                ts=100.0,
+                fields={"signer_signature_hash": closed_hash, "block_height": 10},
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_threshold_reached",
+                ts=101.0,
+                fields={
+                    "signer_signature_hash": closed_hash,
+                    "block_height": 10,
+                    "percent_approved": 72.0,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_pushed",
+                ts=102.0,
+                fields={"signer_signature_hash": closed_hash, "block_height": 10},
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_proposal",
+                ts=103.0,
+                fields={"signer_signature_hash": open_hash, "block_height": 11},
+            )
+        )
+
+        snapshot = detector.snapshot(now=110.0)
+        recent = snapshot["recent_proposals"]
+        self.assertGreaterEqual(len(recent), 2)
+        self.assertEqual(recent[0]["signature_hash"], open_hash)
+        self.assertEqual(recent[1]["signature_hash"], closed_hash)
+        self.assertTrue(recent[0]["is_open"])
+        self.assertFalse(recent[1]["is_open"])
+        self.assertEqual(recent[0]["status"], "in_progress")
+        self.assertEqual(recent[1]["status"], "approved")
+        self.assertTrue(recent[1]["threshold_seen"])
+
+    def test_recent_proposal_status_rejected(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                proposal_timeout_seconds=99999,
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        rejected_hash = "deadbeef01"
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_proposal",
+                ts=100.0,
+                fields={"signer_signature_hash": rejected_hash, "block_height": 12},
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_response",
+                ts=101.0,
+                fields={
+                    "signer_signature_hash": rejected_hash,
+                    "reject_reason": "SortitionViewMismatch",
+                },
+            )
+        )
+
+        snapshot = detector.snapshot(now=110.0)
+        recent = snapshot["recent_proposals"]
+        rejected_row = next(row for row in recent if row["signature_hash"] == rejected_hash)
+        self.assertEqual(rejected_row["status"], "rejected")
 
 
 if __name__ == "__main__":

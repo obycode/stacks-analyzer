@@ -103,6 +103,12 @@ def build_service_config(raw: Optional[Dict[str, Any]]) -> ServiceConfig:
                 DetectorConfig.closed_proposal_retention_seconds,
             )
         ),
+        proposal_history_size=int(
+            detector_payload.get(
+                "proposal_history_size",
+                DetectorConfig.proposal_history_size,
+            )
+        ),
     )
 
     telegram_payload = payload.get("telegram", {})

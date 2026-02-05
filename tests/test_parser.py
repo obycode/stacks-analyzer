@@ -45,6 +45,169 @@ class TestLogParser(unittest.TestCase):
             event.fields["signer_signature_hash"], "aabbccddeeff00112233"
         )
 
+    def test_parse_node_winning_commit_and_tenure_events(self) -> None:
+        parser = LogParser()
+        winning_line = (
+            "Feb 04 08:01:14 host stacks-node[1]: INFO [1770210074.818374] "
+            "[stacks-node/src/nakamoto_node.rs:345] [main] "
+            "Received burnchain block #934988 including block_commit_op (winning) - "
+            "bc1qxlne4qmmgpc6rlrvrdyjprnay9q6ykg98gz2j3 "
+            "(de3b7737fae28c2ca5375aea614a129a5e3d03c058c3ab0a8264b8bd7fc04418)"
+        )
+        tenure_notify_line = (
+            "Feb 04 08:01:14 host stacks-node[1]: INFO [1770210074.818404] "
+            "Tenure: Notify burn block!, "
+            "consensus_hash: 700bcef8d93d6b0265ce558114613d85e60bb9da, "
+            "burn_block_hash: 00000000000000000000d27894a9ffaf0be83201efbfce14ef2f00738ea7557a, "
+            "winning_stacks_block_hash: de3b7737fae28c2ca5375aea614a129a5e3d03c058c3ab0a8264b8bd7fc04418, "
+            "burn_block_height: 934988, sortition_id: abcdef"
+        )
+        tenure_change_line = (
+            "Feb 04 08:01:38 host stacks-node[1]: INFO [1770210098.664609] "
+            "[block-proposal] Include tx, tx: de87361bbfb8358f2401f96f6c52da86748854334c708e2c8696a19a1d2df269, "
+            "payload: TenureChange(ExtendAll), origin: SPVYF6M3FD0738FWDGDMJ84EFMGM38JS0N7DE42K"
+        )
+        tenure_change_with_height_line = (
+            "Feb 04 08:01:38 host stacks-node[1]: INFO [1770210098.664609] "
+            "[block-proposal] Include tx, tx: de87361bbfb8358f2401f96f6c52da86748854334c708e2c8696a19a1d2df269, "
+            "payload: TenureChange(ExtendAll), origin: SPVYF6M3FD0738FWDGDMJ84EFMGM38JS0N7DE42K, "
+            "height: 6319949, burn_block_height: 934990"
+        )
+        consensus_line = (
+            "Feb 04 08:01:05 host stacks-node[1]: INFO [1770210065.769302] "
+            "CONSENSUS(934988): 700bcef8d93d6b0265ce558114613d85e60bb9da"
+        )
+
+        winning_events = parser.parse_line("node", winning_line)
+        self.assertEqual(len(winning_events), 1)
+        self.assertEqual(winning_events[0].kind, "node_winning_block_commit")
+        self.assertEqual(winning_events[0].fields["burn_height"], 934988)
+        self.assertEqual(
+            winning_events[0].fields["apparent_sender"],
+            "bc1qxlne4qmmgpc6rlrvrdyjprnay9q6ykg98gz2j3",
+        )
+
+        tenure_notify_events = parser.parse_line("node", tenure_notify_line)
+        self.assertEqual(len(tenure_notify_events), 1)
+        self.assertEqual(tenure_notify_events[0].kind, "node_tenure_notify")
+        self.assertEqual(
+            tenure_notify_events[0].fields["consensus_hash"],
+            "700bcef8d93d6b0265ce558114613d85e60bb9da",
+        )
+        self.assertEqual(tenure_notify_events[0].fields["burn_height"], 934988)
+
+        tenure_change_events = parser.parse_line("node", tenure_change_line)
+        self.assertEqual(len(tenure_change_events), 1)
+        self.assertEqual(tenure_change_events[0].kind, "node_tenure_change")
+        self.assertEqual(
+            tenure_change_events[0].fields["tenure_change_kind"], "ExtendAll"
+        )
+        self.assertEqual(
+            tenure_change_events[0].fields["txid"],
+            "de87361bbfb8358f2401f96f6c52da86748854334c708e2c8696a19a1d2df269",
+        )
+        self.assertIsNone(tenure_change_events[0].fields["block_height"])
+
+        tenure_change_with_height_events = parser.parse_line(
+            "node", tenure_change_with_height_line
+        )
+        self.assertEqual(len(tenure_change_with_height_events), 1)
+        self.assertEqual(
+            tenure_change_with_height_events[0].fields["block_height"], 6319949
+        )
+        self.assertEqual(
+            tenure_change_with_height_events[0].fields["burn_height"], 934990
+        )
+
+        consensus_events = parser.parse_line("node", consensus_line)
+        self.assertEqual(len(consensus_events), 1)
+        self.assertEqual(consensus_events[0].kind, "node_consensus")
+        self.assertEqual(
+            consensus_events[0].fields["consensus_hash"],
+            "700bcef8d93d6b0265ce558114613d85e60bb9da",
+        )
+        self.assertEqual(consensus_events[0].fields["burn_height"], 934988)
+
+    def test_parse_sortition_commits_and_active_miner_update(self) -> None:
+        parser = LogParser()
+        commit_line = (
+            "Feb 04 08:01:05 host stacks-node[1]: INFO [1770210065.757652] "
+            "ACCEPTED(934988) leader block commit "
+            "e0e8e9eb9315bbd3710887cc907059e10a9e7f000918465f65070d9756f99757 "
+            "at 934988,710, apparent_sender: bc1qxlne4qmmgpc6rlrvrdyjprnay9q6ykg98gz2j3, "
+            "stacks_block_hash: de3b7737fae28c2ca5375aea614a129a5e3d03c058c3ab0a8264b8bd7fc04418, "
+            "parent_burn_block: 934987"
+        )
+        winner_line = (
+            "Feb 04 08:01:05 host stacks-node[1]: INFO [1770210065.697281] "
+            "SORTITION(934988): WINNER SELECTED, "
+            "txid: e0e8e9eb9315bbd3710887cc907059e10a9e7f000918465f65070d9756f99757, "
+            "stacks_block_hash: de3b7737fae28c2ca5375aea614a129a5e3d03c058c3ab0a8264b8bd7fc04418, "
+            "burn_block_hash: 00000000000000000000d27894a9ffaf0be83201efbfce14ef2f00738ea7557a"
+        )
+        active_line = (
+            "Feb 04 08:01:04 host stacks-signer[1]: INFO [1770210064.146379] "
+            "Received state machine update from signer ... "
+            "content: V1 { burn_block: 700bcef8d93d6b0265ce558114613d85e60bb9da, "
+            "burn_block_height: 934988, current_miner: ActiveMiner { "
+            "current_miner_pkh: 37e79a837b4071a1fc6c1b49208e7d2141a25905, "
+            "tenure_id: 700bcef8d93d6b0265ce558114613d85e60bb9da, "
+            "parent_tenure_id: 0e95ff3f705c6061c82ace32890ee88c39fa4f69, "
+            "parent_tenure_last_block: 1a9bcc747b54bf37c7a911e87887b827ff7574b96b6e1ddae1d9ef6e5ec5e939, "
+            "parent_tenure_last_block_height: 6319944 } }"
+        )
+
+        commit_events = parser.parse_line("node", commit_line)
+        self.assertEqual(len(commit_events), 1)
+        self.assertEqual(commit_events[0].kind, "node_leader_block_commit")
+        self.assertEqual(commit_events[0].fields["burn_height"], 934988)
+        self.assertEqual(commit_events[0].fields["sortition_position"], 710)
+        self.assertEqual(
+            commit_events[0].fields["commit_txid"],
+            "e0e8e9eb9315bbd3710887cc907059e10a9e7f000918465f65070d9756f99757",
+        )
+
+        winner_events = parser.parse_line("node", winner_line)
+        self.assertEqual(len(winner_events), 1)
+        self.assertEqual(winner_events[0].kind, "node_sortition_winner_selected")
+        self.assertEqual(winner_events[0].fields["burn_height"], 934988)
+
+        active_events = parser.parse_line("signer", active_line)
+        self.assertEqual(len(active_events), 1)
+        self.assertEqual(active_events[0].kind, "signer_state_machine_update")
+        self.assertEqual(active_events[0].fields["burn_height"], 934988)
+        self.assertEqual(
+            active_events[0].fields["current_miner_pkh"],
+            "37e79a837b4071a1fc6c1b49208e7d2141a25905",
+        )
+        self.assertEqual(
+            active_events[0].fields["parent_tenure_last_block_height"], 6319944
+        )
+
+    def test_parse_sortition_winner_rejected(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 04 07:38:15 host stacks-node[1]: INFO [1770208695.571152] "
+            "SORTITION(934983): WINNER REJECTED: "
+            "\"Null miner defeats block winner due to insufficient commit carryover\", "
+            "txid: 35c140e1dc254ab7e761a1951093b369e34d279c52c9493b81584fb688a7d3e8, "
+            "stacks_block_hash: 7ae1f7fdffa89eea936f7bb9982abdd5a63dd7dd4f5ff50e8b0076d3a50edf34, "
+            "burn_block_hash: 00000000000000000001bbfb10185b1894cd597b14450b197e2bb04b48c22eee"
+        )
+
+        events = parser.parse_line("node", line)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].kind, "node_sortition_winner_rejected")
+        self.assertEqual(events[0].fields["burn_height"], 934983)
+        self.assertEqual(
+            events[0].fields["rejection_reason"],
+            "Null miner defeats block winner due to insufficient commit carryover",
+        )
+        self.assertEqual(
+            events[0].fields["rejected_txid"],
+            "35c140e1dc254ab7e761a1951093b369e34d279c52c9493b81584fb688a7d3e8",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

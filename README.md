@@ -60,11 +60,12 @@ When enabled, the dashboard serves:
 - `GET /`: interactive UI
 - `GET /api/state`: raw JSON state
 - `GET /healthz`: health probe
-- Signature hashes in open proposals are clickable and copy the full hash to clipboard.
-- Open proposals table includes block heights when available.
-- Header shows current observed Bitcoin and Stacks block heights.
-- Signers table shows all observed signers, estimated weight, and estimated weight share of total.
-- Threshold Ratio = `completed_with_threshold / completed_proposals * 100`.
+- Recent proposals table (latest 5, with copyable signature hashes and in-progress/approved/rejected status highlighting).
+- Visual sortition view for the latest 3 burn heights.
+- Each burn-height card shows all captured block commits, the committed stacks block target, and winner highlighting (or null-miner outcome).
+- Tenure extends table shows the latest 5 extend events with extend kind, Stacks block height, burn height, and txid.
+- Existing operational panels remain: uptime/age metrics, alerts, signer participation, and counters.
+- Null-miner sortitions are detected (`WINNER REJECTED` / zero winning hash).
 
 CLI flags:
 

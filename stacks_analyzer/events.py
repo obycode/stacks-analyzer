@@ -8,6 +8,27 @@ EPOCH_TS_RE = re.compile(r"\[(?P<epoch>\d{10}(?:\.\d+)?)\]")
 STALE_CHUNK_RE = re.compile(
     r"ID\s+(?P<chunk_id>\d+)\s+version\s+(?P<version>\d+).+expected\s+(?P<expected>\d+)\)"
 )
+WINNING_BLOCK_COMMIT_RE = re.compile(
+    r"Received burnchain block #(?P<burn_height>\d+)\s+including block_commit_op "
+    r"\(winning\)\s+-\s+(?P<apparent_sender>[^\s]+)\s+\((?P<stacks_block_hash>[0-9a-fA-F]+)\)"
+)
+CONSENSUS_LINE_RE = re.compile(
+    r"CONSENSUS\((?P<burn_height>\d+)\):\s*(?P<consensus_hash>[0-9a-fA-F]+)"
+)
+TENURE_CHANGE_PAYLOAD_RE = re.compile(r"payload:\s*TenureChange\((?P<kind>[^)]+)\)")
+ACCEPTED_BURN_HEIGHT_RE = re.compile(r"ACCEPTED\((?P<burn_height>\d+)\)")
+LEADER_BLOCK_COMMIT_RE = re.compile(
+    r"leader block commit\s+(?P<txid>[0-9a-fA-F]+)\s+at\s+"
+    r"(?P<burn_height>\d+),(?P<sortition_position>\d+)"
+)
+SORTITION_WINNER_RE = re.compile(
+    r"SORTITION\((?P<burn_height>\d+)\):\s+WINNER SELECTED,\s+txid:\s+"
+    r"(?P<txid>[0-9a-fA-F]+),\s+stacks_block_hash:\s+(?P<stacks_block_hash>[0-9a-fA-F]+)"
+)
+SORTITION_WINNER_REJECTED_RE = re.compile(
+    r"SORTITION\((?P<burn_height>\d+)\):\s+WINNER REJECTED:\s+\"(?P<reason>[^\"]+)\",\s+"
+    r"txid:\s+(?P<txid>[0-9a-fA-F]+),\s+stacks_block_hash:\s+(?P<stacks_block_hash>[0-9a-fA-F]+)"
+)
 
 
 def extract_timestamp(line: str) -> float:
@@ -77,6 +98,196 @@ class LogParser:
                     )
                 )
 
+            if "leader block commit" in line and "ACCEPTED(" in line:
+                burn_height_match = ACCEPTED_BURN_HEIGHT_RE.search(line)
+                commit_match = LEADER_BLOCK_COMMIT_RE.search(line)
+                parent_burn_block = extract_field(line, "parent_burn_block")
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_leader_block_commit",
+                        ts=ts,
+                        fields={
+                            "burn_height": (
+                                int(burn_height_match.group("burn_height"))
+                                if burn_height_match
+                                else None
+                            ),
+                            "commit_txid": (
+                                commit_match.group("txid") if commit_match else None
+                            ),
+                            "sortition_position": (
+                                int(commit_match.group("sortition_position"))
+                                if commit_match
+                                else None
+                            ),
+                            "apparent_sender": extract_field(line, "apparent_sender"),
+                            "stacks_block_hash": extract_field(line, "stacks_block_hash"),
+                            "parent_burn_block": (
+                                int(parent_burn_block) if parent_burn_block else None
+                            ),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "SORTITION(" in line and "WINNER SELECTED" in line:
+                winner_match = SORTITION_WINNER_RE.search(line)
+                burn_block_hash = extract_field(line, "burn_block_hash")
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_sortition_winner_selected",
+                        ts=ts,
+                        fields={
+                            "burn_height": (
+                                int(winner_match.group("burn_height"))
+                                if winner_match
+                                else None
+                            ),
+                            "winner_txid": (
+                                winner_match.group("txid") if winner_match else None
+                            ),
+                            "winning_stacks_block_hash": (
+                                winner_match.group("stacks_block_hash")
+                                if winner_match
+                                else None
+                            ),
+                            "burn_block_hash": burn_block_hash,
+                        },
+                        line=line,
+                    )
+                )
+
+            if "SORTITION(" in line and "WINNER REJECTED" in line:
+                rejected_match = SORTITION_WINNER_REJECTED_RE.search(line)
+                burn_block_hash = extract_field(line, "burn_block_hash")
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_sortition_winner_rejected",
+                        ts=ts,
+                        fields={
+                            "burn_height": (
+                                int(rejected_match.group("burn_height"))
+                                if rejected_match
+                                else None
+                            ),
+                            "rejected_txid": (
+                                rejected_match.group("txid") if rejected_match else None
+                            ),
+                            "rejected_stacks_block_hash": (
+                                rejected_match.group("stacks_block_hash")
+                                if rejected_match
+                                else None
+                            ),
+                            "rejection_reason": (
+                                rejected_match.group("reason")
+                                if rejected_match
+                                else None
+                            ),
+                            "burn_block_hash": burn_block_hash,
+                        },
+                        line=line,
+                    )
+                )
+
+            if "Tenure: Notify burn block!" in line:
+                burn_block_height = extract_field(line, "burn_block_height")
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_tenure_notify",
+                        ts=ts,
+                        fields={
+                            "consensus_hash": extract_field(line, "consensus_hash"),
+                            "burn_height": (
+                                int(burn_block_height) if burn_block_height else None
+                            ),
+                            "winning_stacks_block_hash": extract_field(
+                                line, "winning_stacks_block_hash"
+                            ),
+                            "sortition_id": extract_field(line, "sortition_id"),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "CONSENSUS(" in line:
+                consensus_match = CONSENSUS_LINE_RE.search(line)
+                if consensus_match:
+                    events.append(
+                        ParsedEvent(
+                            source=source,
+                            kind="node_consensus",
+                            ts=ts,
+                            fields={
+                                "consensus_hash": consensus_match.group("consensus_hash"),
+                                "burn_height": int(consensus_match.group("burn_height")),
+                            },
+                            line=line,
+                        )
+                    )
+
+            if "including block_commit_op (winning) -" in line:
+                winning_match = WINNING_BLOCK_COMMIT_RE.search(line)
+                if winning_match:
+                    events.append(
+                        ParsedEvent(
+                            source=source,
+                            kind="node_winning_block_commit",
+                            ts=ts,
+                            fields={
+                                "burn_height": int(winning_match.group("burn_height")),
+                                "apparent_sender": winning_match.group("apparent_sender"),
+                                "winning_stacks_block_hash": winning_match.group(
+                                    "stacks_block_hash"
+                                ),
+                                # Some deployments may include one of these fields.
+                                "miner_pubkey": (
+                                    extract_field(line, "miner_pubkey")
+                                    or extract_field(line, "miner_public_key")
+                                    or extract_field(line, "public_key")
+                                ),
+                            },
+                            line=line,
+                        )
+                    )
+
+            if "payload: TenureChange(" in line:
+                tenure_match = TENURE_CHANGE_PAYLOAD_RE.search(line)
+                block_height_match = re.search(
+                    r"(?:^|,\s)block_height:\s*(\d+)", line
+                ) or re.search(r"(?:^|,\s)height:\s*(\d+)", line)
+                burn_height_match = re.search(
+                    r"(?:^|,\s)burn_block_height:\s*(\d+)", line
+                )
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_tenure_change",
+                        ts=ts,
+                        fields={
+                            "tenure_change_kind": tenure_match.group("kind")
+                            if tenure_match
+                            else None,
+                            "txid": extract_field(line, "tx"),
+                            "origin": extract_field(line, "origin"),
+                            "block_height": (
+                                int(block_height_match.group(1))
+                                if block_height_match
+                                else None
+                            ),
+                            "burn_height": (
+                                int(burn_height_match.group(1))
+                                if burn_height_match
+                                else None
+                            ),
+                        },
+                        line=line,
+                    )
+                )
+
             if " ERROR " in line or " WARN " in line:
                 events.append(
                     ParsedEvent(
@@ -103,6 +314,38 @@ class LogParser:
                             "block_height": int(block_height) if block_height else None,
                             "burn_height": int(burn_height) if burn_height else None,
                             "block_id": extract_field(line, "block_id"),
+                            "consensus_hash": extract_field(line, "consensus_hash"),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "Received state machine update" in line and "ActiveMiner {" in line:
+                burn_block_height = extract_field(line, "burn_block_height")
+                parent_tenure_last_block_height = extract_field(
+                    line, "parent_tenure_last_block_height"
+                )
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_state_machine_update",
+                        ts=ts,
+                        fields={
+                            "burn_block": extract_field(line, "burn_block"),
+                            "burn_height": (
+                                int(burn_block_height) if burn_block_height else None
+                            ),
+                            "current_miner_pkh": extract_field(line, "current_miner_pkh"),
+                            "tenure_id": extract_field(line, "tenure_id"),
+                            "parent_tenure_id": extract_field(line, "parent_tenure_id"),
+                            "parent_tenure_last_block": extract_field(
+                                line, "parent_tenure_last_block"
+                            ),
+                            "parent_tenure_last_block_height": (
+                                int(parent_tenure_last_block_height)
+                                if parent_tenure_last_block_height
+                                else None
+                            ),
                         },
                         line=line,
                     )
@@ -128,6 +371,7 @@ class LogParser:
                             "total_weight": int(total_weight) if total_weight else None,
                             "percent_approved": float(percent) if percent else None,
                             "block_height": int(block_height) if block_height else None,
+                            "consensus_hash": extract_field(line, "consensus_hash"),
                         },
                         line=line,
                     )
@@ -147,6 +391,7 @@ class LogParser:
                             "signer_pubkey": extract_field(line, "signer_pubkey"),
                             "percent_approved": float(percent) if percent else None,
                             "block_height": int(block_height) if block_height else None,
+                            "consensus_hash": extract_field(line, "consensus_hash"),
                         },
                         line=line,
                     )
