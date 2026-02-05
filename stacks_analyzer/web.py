@@ -171,6 +171,13 @@ DASHBOARD_HTML = """<!doctype html>
       background: rgba(148, 163, 184, 0.15);
       border-color: rgba(148, 163, 184, 0.35);
     }
+    .link {
+      color: #bae6fd;
+      text-decoration: none;
+    }
+    .link:hover {
+      text-decoration: underline;
+    }
 
     .sortition-grid {
       display: grid;
@@ -190,6 +197,11 @@ DASHBOARD_HTML = """<!doctype html>
       margin-bottom: 8px;
       font-size: 12px;
       color: var(--muted);
+    }
+    .round-age {
+      color: var(--muted);
+      margin-left: 6px;
+      font-size: 11px;
     }
     .badge {
       border-radius: 999px;
@@ -333,7 +345,89 @@ DASHBOARD_HTML = """<!doctype html>
       return text.slice(0, size) + "...";
     }
 
-    function renderSortitionCards(rounds) {
+    function linkTo(url, label) {
+      return "<a class='link' href='" + url + "' target='_blank' rel='noopener noreferrer'>" + label + "</a>";
+    }
+
+    function mempoolAddressLink(address) {
+      if (!address) return "-";
+      return linkTo("https://mempool.space/address/" + encodeURIComponent(address), escapeHtml(address));
+    }
+
+    function mempoolTxLink(txid, label) {
+      if (!txid) return "-";
+      return linkTo("https://mempool.space/tx/" + encodeURIComponent(txid), label);
+    }
+
+    function hiroTxLink(txid, label) {
+      if (!txid) return "-";
+      return linkTo("https://explorer.hiro.so/txid/" + encodeURIComponent(txid), label);
+    }
+
+    function hiroBlockLink(height, label) {
+      if (height === null || height === undefined) return "-";
+      return linkTo("https://explorer.hiro.so/block/" + encodeURIComponent(height), label);
+    }
+
+    function hiroBtcBlockLink(height, label) {
+      if (height === null || height === undefined) return "-";
+      return linkTo("https://explorer.hiro.so/btcblock/" + encodeURIComponent(height), label);
+    }
+
+    function hiroBlockHashLink(blockHash, label) {
+      if (!blockHash) return "-";
+      return linkTo("https://explorer.hiro.so/block/" + encodeURIComponent(blockHash), label);
+    }
+
+    function isLikelyBtcAddress(value) {
+      return value.startsWith("bc1") || value.startsWith("1") || value.startsWith("3");
+    }
+
+    function linkifyAlertMessage(alert) {
+      const message = String(alert.message || "");
+      let rendered = escapeHtml(message);
+      const key = String(alert.key || "");
+
+      if (key.startsWith("burn-block-")) {
+        rendered = rendered.replace(/height (\d+)/, (match, height) => {
+          return "height " + hiroBtcBlockLink(height, escapeHtml(height));
+        });
+        rendered = rendered.replace(/new_miner=txid:([0-9a-fA-F]+)/, (_match, txid) => {
+          return "new_miner=txid:" + mempoolTxLink(txid, escapeHtml(shortHash(txid, 20)));
+        });
+        rendered = rendered.replace(/new_miner=([A-Za-z0-9]+)/, (match, value) => {
+          if (value === "unchanged" || value === "n/a") {
+            return match;
+          }
+          if (isLikelyBtcAddress(value)) {
+            return "new_miner=" + mempoolAddressLink(value);
+          }
+          return match;
+        });
+      }
+
+      if (key.startsWith("tenure-extend-")) {
+        rendered = rendered.replace(/txid=([0-9a-fA-F]+)/, (_match, txid) => {
+          return "txid=" + hiroTxLink(txid, escapeHtml(shortHash(txid, 24)));
+        });
+        rendered = rendered.replace(/block_height=(\d+)/, (_match, height) => {
+          return "block_height=" + hiroBlockLink(height, escapeHtml(height));
+        });
+        rendered = rendered.replace(/burn_height=(\d+)/, (_match, height) => {
+          return "burn_height=" + hiroBtcBlockLink(height, escapeHtml(height));
+        });
+      }
+
+      if (key.startsWith("proposal-timeout-")) {
+        rendered = rendered.replace(/height (\d+)/, (match, height) => {
+          return "height " + hiroBlockLink(height, escapeHtml(height));
+        });
+      }
+
+      return rendered;
+    }
+
+    function renderSortitionCards(rounds, nowEpoch) {
       const container = document.getElementById("sortitionCards");
       if (!rounds.length) {
         container.innerHTML = "<div class='round'>No sortition data yet.</div>";
@@ -343,16 +437,36 @@ DASHBOARD_HTML = """<!doctype html>
         const outcome = round.null_miner_won ? "null-miner" : (round.winner_txid ? "winner-selected" : "pending");
         const badgeClass = round.null_miner_won ? "badge badge-null" : "badge badge-winner";
         const commits = round.commits || [];
+        const candidateTs = [];
+        if (round.winner_ts) candidateTs.push(round.winner_ts);
+        if (round.rejected_ts) candidateTs.push(round.rejected_ts);
+        for (const item of commits) {
+          if (item.ts) candidateTs.push(item.ts);
+        }
+        const latestTs = candidateTs.length ? Math.max(...candidateTs) : null;
+        const ageText = latestTs ? fmtAge(Math.max(0, nowEpoch - latestTs)) : "";
         const commitHtml = commits.length
           ? commits.map((item) => {
-              const blockTarget = item.stacks_block_height === null || item.stacks_block_height === undefined
-                ? (item.stacks_block_hash || "-")
-                : String(item.stacks_block_hash || "-") + " (h=" + item.stacks_block_height + ")";
+              const hasHeight = item.stacks_block_height !== null && item.stacks_block_height !== undefined;
+              const blockHash = item.stacks_block_hash || "-";
+              const blockTarget = hasHeight
+                ? String(blockHash) + " (h=" + item.stacks_block_height + ")"
+                : blockHash;
+              const targetLabel = escapeHtml(shortHash(blockTarget, 36));
               const commitClass = item.is_winner ? "commit commit-winner" : "commit";
-              return "<div class='" + commitClass + "'><div class='mono'>" + escapeHtml(item.apparent_sender || "-") + "</div><div class='mono'>commit " + escapeHtml(shortHash(item.commit_txid, 20)) + "</div><div class='mono'>target " + escapeHtml(shortHash(blockTarget, 36)) + "</div></div>";
+              const address = item.apparent_sender || "";
+              const commitLabel = escapeHtml(shortHash(item.commit_txid, 20));
+              const addressHtml = address ? mempoolAddressLink(address) : "-";
+              const commitLink = item.commit_txid ? mempoolTxLink(item.commit_txid, commitLabel) : "-";
+              const targetLink = item.stacks_block_hash
+                ? hiroBlockHashLink(item.stacks_block_hash, targetLabel)
+                : targetLabel;
+              return "<div class='" + commitClass + "'><div class='mono'>" + addressHtml + "</div><div class='mono'>commit " + commitLink + "</div><div class='mono'>target " + targetLink + "</div></div>";
             }).join("")
           : "<div class='commit'>No commits captured for this burn height.</div>";
-        return "<div class='round'><div class='round-head'><span>Burn #" + escapeHtml(round.burn_height) + "</span><span class='" + badgeClass + "'>" + escapeHtml(outcome) + "</span></div><div class='commit-list'>" + commitHtml + "</div></div>";
+        const burnLabel = "Burn #" + escapeHtml(round.burn_height);
+        const ageLabel = ageText ? " <span class='round-age'>" + escapeHtml(ageText) + " ago</span>" : "";
+        return "<div class='round'><div class='round-head'><span>" + burnLabel + ageLabel + "</span><span class='" + badgeClass + "'>" + escapeHtml(outcome) + "</span></div><div class='commit-list'>" + commitHtml + "</div></div>";
       }).join("");
     }
 
@@ -363,12 +477,19 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       body.innerHTML = items.map((item) => {
-        return "<tr><td>" + escapeHtml(fmtWallClock(item.ts)) + "</td><td>" + escapeHtml(item.kind || "-") + "</td><td>" + escapeHtml(item.block_height === null || item.block_height === undefined ? "-" : item.block_height) + "</td><td>" + escapeHtml(item.burn_height === null || item.burn_height === undefined ? "-" : item.burn_height) + "</td><td class='mono'>" + escapeHtml(shortHash(item.txid || "-", 24)) + "</td></tr>";
+        const blockHeight = item.block_height === null || item.block_height === undefined ? "-" : item.block_height;
+        const burnHeight = item.burn_height === null || item.burn_height === undefined ? "-" : item.burn_height;
+        const blockLink = blockHeight === "-" ? "-" : hiroBlockLink(blockHeight, escapeHtml(blockHeight));
+        const burnLink = burnHeight === "-" ? "-" : hiroBtcBlockLink(burnHeight, escapeHtml(burnHeight));
+        const txLabel = escapeHtml(shortHash(item.txid || "-", 24));
+        const txLink = item.txid ? hiroTxLink(item.txid, txLabel) : "-";
+        return "<tr><td>" + escapeHtml(fmtWallClock(item.ts)) + "</td><td>" + escapeHtml(item.kind || "-") + "</td><td>" + blockLink + "</td><td>" + burnLink + "</td><td class='mono'>" + txLink + "</td></tr>";
       }).join("");
     }
 
     function render(data) {
       const now = new Date();
+      const nowEpoch = Date.now() / 1000;
       document.getElementById("updated").textContent = "Updated " + now.toLocaleTimeString();
       document.getElementById("uptime").textContent = fmtAge(data.uptime_seconds);
       document.getElementById("tipAge").textContent = fmtAge(data.node_tip_age_seconds);
@@ -384,7 +505,7 @@ DASHBOARD_HTML = """<!doctype html>
       alertsBody.innerHTML = alerts.slice().reverse().slice(0, 20).map((item) => {
         const sev = (item.severity || "ok").toLowerCase();
         const sevClass = "sev sev-" + (sev === "warning" ? "warning" : sev === "critical" ? "critical" : sev === "info" ? "info" : "ok");
-        return "<tr><td>" + escapeHtml(new Date(item.ts * 1000).toLocaleTimeString()) + "</td><td><span class='" + sevClass + "'>" + escapeHtml(sev) + "</span></td><td>" + escapeHtml(item.message || "") + "</td></tr>";
+        return "<tr><td>" + escapeHtml(new Date(item.ts * 1000).toLocaleTimeString()) + "</td><td><span class='" + sevClass + "'>" + escapeHtml(sev) + "</span></td><td>" + linkifyAlertMessage(item) + "</td></tr>";
       }).join("");
 
       const signers = data.signers || data.large_signers || [];
@@ -421,11 +542,14 @@ DASHBOARD_HTML = """<!doctype html>
             : status === "approved"
               ? "approved"
               : "unknown";
-        return "<tr class='" + rowClass + "'><td class='mono'><button class='hash-btn mono' data-copy-hash='" + escapeHtml(item.signature_hash) + "' title='Copy full hash'>" + label + "</button></td><td><span class='" + statusClass + "'>" + statusLabel + "</span></td><td>" + escapeHtml(blockHeight) + "</td><td>" + fmtAge(item.age_seconds) + "</td><td>" + Number(item.max_percent_observed || 0).toFixed(1) + "%</td><td>" + (item.threshold_seen ? "yes" : "no") + "</td></tr>";
+        const blockLink = (status === "approved" && blockHeight !== "-")
+          ? hiroBlockLink(blockHeight, escapeHtml(blockHeight))
+          : escapeHtml(blockHeight);
+        return "<tr class='" + rowClass + "'><td class='mono'><button class='hash-btn mono' data-copy-hash='" + escapeHtml(item.signature_hash) + "' title='Copy full hash'>" + label + "</button></td><td><span class='" + statusClass + "'>" + statusLabel + "</span></td><td>" + blockLink + "</td><td>" + fmtAge(item.age_seconds) + "</td><td>" + Number(item.max_percent_observed || 0).toFixed(1) + "%</td><td>" + (item.threshold_seen ? "yes" : "no") + "</td></tr>";
       }).join("");
       }
 
-      renderSortitionCards(data.recent_sortition_details || []);
+      renderSortitionCards(data.recent_sortition_details || [], nowEpoch);
       renderTenureExtends(data.recent_tenure_extends || []);
 
       const lines = data.lines || {};
