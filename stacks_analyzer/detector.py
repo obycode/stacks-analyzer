@@ -150,8 +150,27 @@ class Detector:
     def process_event(self, event: ParsedEvent) -> List[Alert]:
         alerts: List[Alert] = []
         self.event_counts[event.kind] += 1
+        previous_bitcoin_height = self.current_bitcoin_block_height
         self._update_chain_heights(event.fields)
         self._index_hash_height_from_event(event)
+        if (
+            self.current_bitcoin_block_height is not None
+            and (
+                previous_bitcoin_height is None
+                or self.current_bitcoin_block_height > previous_bitcoin_height
+            )
+        ):
+            alerts.append(
+                Alert(
+                    key="burn-block-%d" % self.current_bitcoin_block_height,
+                    severity="info",
+                    message=self._burn_block_alert_message(
+                        burn_height=self.current_bitcoin_block_height,
+                        event=event,
+                    ),
+                    ts=event.ts,
+                )
+            )
 
         if event.kind == "node_tip_advanced":
             if self.last_node_tip_ts is not None:
@@ -326,6 +345,31 @@ class Detector:
                         "burn_height": burn_height,
                     }
                 )
+                extend_key = (
+                    "tenure-extend-%s" % self.last_tenure_extend_txid
+                    if self.last_tenure_extend_txid
+                    else "tenure-extend-%s-%s-%s"
+                    % (
+                        tenure_change_kind,
+                        block_height if block_height is not None else "na",
+                        burn_height if burn_height is not None else "na",
+                    )
+                )
+                self._emit_alert(
+                    alerts=alerts,
+                    key=extend_key,
+                    severity="info",
+                    message=(
+                        "Tenure extend observed: kind=%s txid=%s block_height=%s burn_height=%s"
+                        % (
+                            tenure_change_kind,
+                            self.last_tenure_extend_txid or "n/a",
+                            block_height if block_height is not None else "n/a",
+                            burn_height if burn_height is not None else "n/a",
+                        )
+                    ),
+                    ts=event.ts,
+                )
 
         elif event.kind == "signer_state_machine_update":
             current_miner_pkh = event.fields.get("current_miner_pkh")
@@ -477,11 +521,23 @@ class Detector:
                         is_open=True,
                     )
             if reject_reason and reject_reason != "NotRejected":
+                key = (
+                    "signer-reject-%s" % signature_hash
+                    if isinstance(signature_hash, str) and signature_hash
+                    else "signer-reject-%s" % reject_reason
+                )
+                message = (
+                    "Signer response rejection for proposal %s: %s"
+                    % (
+                        (signature_hash[:12] if isinstance(signature_hash, str) else "unknown"),
+                        reject_reason,
+                    )
+                )
                 self._emit_alert(
                     alerts=alerts,
-                    key="signer-reject-%s" % reject_reason,
-                    severity="critical",
-                    message="Signer response rejection detected: %s" % reject_reason,
+                    key=key,
+                    severity="info",
+                    message=message,
                     ts=event.ts,
                 )
 
@@ -738,6 +794,58 @@ class Detector:
             if commit.commit_txid == round_state.winner_txid:
                 return commit.apparent_sender
         return None
+
+    def _winner_apparent_sender_for_txid(
+        self, burn_height: int, winner_txid: str
+    ) -> Optional[str]:
+        round_state = self.sortition_rounds.get(burn_height)
+        if round_state is None:
+            return None
+        for commit in round_state.commits:
+            if commit.commit_txid == winner_txid:
+                return commit.apparent_sender
+        return None
+
+    def _burn_block_alert_message(self, burn_height: int, event: ParsedEvent) -> str:
+        sortition_state = "not_observed"
+        new_miner = "n/a"
+
+        if event.kind == "node_sortition_winner_selected":
+            winner_txid = event.fields.get("winner_txid")
+            winning_stacks_block_hash = event.fields.get("winning_stacks_block_hash")
+            if self._is_zero_hash(winner_txid) or self._is_zero_hash(
+                winning_stacks_block_hash
+            ):
+                sortition_state = "null_miner"
+                new_miner = "unchanged"
+            elif isinstance(winner_txid, str) and winner_txid:
+                sortition_state = "winner_selected"
+                winner_sender = self._winner_apparent_sender_for_txid(
+                    burn_height, winner_txid
+                )
+                new_miner = winner_sender or ("txid:%s" % winner_txid[:12])
+            else:
+                sortition_state = "pending"
+        elif event.kind == "node_sortition_winner_rejected":
+            sortition_state = "null_miner"
+            new_miner = "unchanged"
+        else:
+            round_state = self.sortition_rounds.get(burn_height)
+            if round_state is not None:
+                if round_state.null_miner_won:
+                    sortition_state = "null_miner"
+                    new_miner = "unchanged"
+                elif round_state.winner_txid:
+                    sortition_state = "winner_selected"
+                    winner_sender = self._winner_apparent_sender(round_state)
+                    new_miner = winner_sender or ("txid:%s" % round_state.winner_txid[:12])
+                else:
+                    sortition_state = "pending"
+
+        return (
+            "New burn block observed at height %d | sortition=%s | new_miner=%s"
+            % (burn_height, sortition_state, new_miner)
+        )
 
     def _sortition_commit_to_row(
         self,

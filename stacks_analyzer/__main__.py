@@ -71,6 +71,11 @@ def parse_args() -> argparse.Namespace:
         help="Send periodic reports to Telegram.",
     )
     parser.add_argument(
+        "--telegram-min-alert-severity",
+        choices=["info", "warning", "critical"],
+        help="Minimum alert severity sent to Telegram (default: critical).",
+    )
+    parser.add_argument(
         "--web-enable",
         action="store_true",
         help="Enable built-in dashboard web server.",
@@ -132,6 +137,8 @@ def merged_config_from_cli(args: argparse.Namespace) -> ServiceConfig:
         merged["telegram"]["enabled"] = True
     if args.telegram_send_reports:
         merged["telegram"]["send_reports"] = True
+    if args.telegram_min_alert_severity:
+        merged["telegram"]["min_alert_severity"] = args.telegram_min_alert_severity
 
     if args.web_enable:
         merged["web"] = merged.get("web", {})

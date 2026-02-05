@@ -13,6 +13,12 @@ from .sources import spawn_source_threads
 from .telegram import TelegramNotifier
 from .web import DashboardServer
 
+ALERT_SEVERITY_RANK = {
+    "info": 10,
+    "warning": 20,
+    "critical": 30,
+}
+
 
 class MonitoringService:
     def __init__(self, config: ServiceConfig) -> None:
@@ -228,8 +234,19 @@ class MonitoringService:
             )
         rendered = "[ALERT][%s] %s" % (alert.severity.upper(), alert.message)
         print(rendered, flush=True)
-        if self.notifier:
+        if self.notifier and self._should_notify_telegram_for_alert(alert):
             self.notifier.send(rendered)
+
+    def _should_notify_telegram_for_alert(self, alert: Alert) -> bool:
+        minimum = ALERT_SEVERITY_RANK.get(
+            str(self.config.telegram.min_alert_severity).lower(),
+            ALERT_SEVERITY_RANK["critical"],
+        )
+        current = ALERT_SEVERITY_RANK.get(
+            str(alert.severity).lower(),
+            0,
+        )
+        return current >= minimum
 
     def _state_now(self) -> float:
         now = time.time()

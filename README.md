@@ -95,6 +95,14 @@ python3 -m stacks_analyzer \
 ```
 
 Add `--telegram-send-reports` to send periodic reports to Telegram in addition to alerts.
+Telegram alert delivery is severity-based:
+- `info`
+- `warning`
+- `critical`
+
+By default, Telegram receives only `critical` alerts. Configure minimum severity with:
+- CLI: `--telegram-min-alert-severity warning`
+- Config: `"telegram": { "min_alert_severity": "warning" }`
 
 ## Signer Name Mapping
 

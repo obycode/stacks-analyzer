@@ -620,6 +620,98 @@ class TestDetector(unittest.TestCase):
         rejected_row = next(row for row in recent if row["signature_hash"] == rejected_hash)
         self.assertEqual(rejected_row["status"], "rejected")
 
+    def test_signer_block_response_rejection_is_info(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        alerts = detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_response",
+                ts=100.0,
+                fields={
+                    "signer_signature_hash": "aa11bb22cc33",
+                    "reject_reason": "SortitionViewMismatch",
+                },
+            )
+        )
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].severity, "info")
+        self.assertEqual(alerts[0].key, "signer-reject-aa11bb22cc33")
+
+    def test_info_alerts_for_new_burn_block_and_tenure_extend(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        burn_alerts = detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tenure_notify",
+                ts=100.0,
+                fields={
+                    "burn_height": 934988,
+                    "consensus_hash": "aa" * 20,
+                },
+            )
+        )
+        burn_keys = {alert.key for alert in burn_alerts}
+        self.assertIn("burn-block-934988", burn_keys)
+        self.assertTrue(all(alert.severity == "info" for alert in burn_alerts))
+        burn_message = next(
+            alert.message for alert in burn_alerts if alert.key == "burn-block-934988"
+        )
+        self.assertIn("sortition=not_observed", burn_message)
+
+        extend_alerts = detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tenure_change",
+                ts=101.0,
+                fields={
+                    "tenure_change_kind": "ExtendAll",
+                    "txid": "tx-extend-1",
+                    "origin": "SPTEST",
+                    "block_height": 6319944,
+                    "burn_height": 934988,
+                },
+            )
+        )
+        extend_keys = {alert.key for alert in extend_alerts}
+        self.assertIn("tenure-extend-tx-extend-1", extend_keys)
+
+    def test_burn_block_alert_includes_sortition_and_new_miner(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.current_bitcoin_block_height = 934987
+        alerts = detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_sortition_winner_selected",
+                ts=100.0,
+                fields={
+                    "burn_height": 934988,
+                    "winner_txid": "aa11bb22cc33dd44",
+                    "winning_stacks_block_hash": "bb" * 32,
+                },
+            )
+        )
+        burn_alert = next(
+            alert for alert in alerts if alert.key == "burn-block-934988"
+        )
+        self.assertEqual(burn_alert.severity, "info")
+        self.assertIn("sortition=winner_selected", burn_alert.message)
+        self.assertIn("new_miner=txid:aa11bb22cc33", burn_alert.message)
+
 
 if __name__ == "__main__":
     unittest.main()

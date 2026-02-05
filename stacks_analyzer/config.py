@@ -11,6 +11,7 @@ class TelegramConfig:
     chat_id: str = ""
     enabled: bool = False
     send_reports: bool = False
+    min_alert_severity: str = "critical"
 
 
 @dataclass
@@ -117,6 +118,9 @@ def build_service_config(raw: Optional[Dict[str, Any]]) -> ServiceConfig:
         chat_id=str(telegram_payload.get("chat_id", "")),
         enabled=bool(telegram_payload.get("enabled", False)),
         send_reports=bool(telegram_payload.get("send_reports", False)),
+        min_alert_severity=str(
+            telegram_payload.get("min_alert_severity", "critical")
+        ).lower(),
     )
 
     web_payload = payload.get("web", {})

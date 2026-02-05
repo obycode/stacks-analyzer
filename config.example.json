@@ -25,7 +25,8 @@
     "enabled": false,
     "token": "",
     "chat_id": "",
-    "send_reports": false
+    "send_reports": false,
+    "min_alert_severity": "critical"
   },
   "web": {
     "enabled": true,
