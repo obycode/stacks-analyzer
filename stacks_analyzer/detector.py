@@ -52,7 +52,6 @@ class ProposalState:
     max_percent: float = 0.0
     max_reject_percent: float = 0.0
     total_weight: Optional[int] = None
-    last_total_weight_approved: int = 0
     last_reject_ts: Optional[float] = None
 
 
@@ -115,6 +114,8 @@ class Detector:
         self.last_tenure_extend_txid: Optional[str] = None
         self.last_tenure_extend_origin: Optional[str] = None
         self.last_tenure_extend_ts: Optional[float] = None
+        self.last_accepted_proposal_burn_height: Optional[int] = None
+        self.last_accepted_proposal_ts: Optional[float] = None
         self.tenure_extend_history: Deque[Dict[str, object]] = deque(
             maxlen=self.config.tenure_extend_history_size
         )
@@ -225,6 +226,12 @@ class Detector:
                         )
                 round_state.winner_ts = event.ts
                 self._refresh_current_miner_from_latest_round(event.ts)
+                self._warn_on_sortition_parent_burn_mismatch(
+                    round_state=round_state,
+                    burn_height=burn_height,
+                    alerts=alerts,
+                    ts=event.ts,
+                )
 
         elif event.kind == "node_sortition_winner_rejected":
             burn_height = event.fields.get("burn_height")
@@ -441,6 +448,7 @@ class Detector:
             signer_pubkey = event.fields.get("signer_pubkey")
             total_weight_approved = event.fields.get("total_weight_approved")
             total_weight = event.fields.get("total_weight")
+            signature_weight = event.fields.get("signature_weight")
             percent = event.fields.get("percent_approved")
             block_height = event.fields.get("block_height")
             consensus_hash = event.fields.get("consensus_hash")
@@ -464,13 +472,9 @@ class Detector:
                     self.total_weight_samples.append(int(total_weight))
                 if percent is not None:
                     state.max_percent = max(state.max_percent, float(percent))
-                if total_weight_approved is not None:
-                    delta = max(0, total_weight_approved - state.last_total_weight_approved)
-                    state.last_total_weight_approved = max(
-                        state.last_total_weight_approved, total_weight_approved
-                    )
-                    if delta > 0 and signer_pubkey:
-                        self.signer_weight_samples[signer_pubkey].append(delta)
+                if isinstance(signature_weight, int) and signature_weight > 0:
+                    if signer_pubkey:
+                        self.signer_weight_samples[signer_pubkey].append(signature_weight)
                 self._record_proposal_activity(
                     signature_hash=signature_hash,
                     state=state,
@@ -821,11 +825,15 @@ class Detector:
         reject_reason = event.fields.get("reject_reason")
         percent_rejected = event.fields.get("percent_rejected")
         total_weight = event.fields.get("total_weight")
+        signature_weight = event.fields.get("signature_weight")
         block_height = event.fields.get("block_height")
         consensus_hash = event.fields.get("consensus_hash")
 
         if isinstance(signer_pubkey, str) and signer_pubkey:
             state.reject_signers.add(signer_pubkey)
+            self.seen_signers.add(signer_pubkey)
+            if isinstance(signature_weight, int) and signature_weight > 0:
+                self.signer_weight_samples[signer_pubkey].append(signature_weight)
         if isinstance(reject_reason, str) and reject_reason:
             state.reject_reasons.add(reject_reason)
         if isinstance(percent_rejected, (int, float)):
@@ -1009,6 +1017,9 @@ class Detector:
         self.closed_proposals[signature_hash] = ts
 
         if finalize_reason != "rejected":
+            if isinstance(state.burn_height, int):
+                self.last_accepted_proposal_burn_height = state.burn_height
+                self.last_accepted_proposal_ts = ts
             tracked_signers = set(self.signer_participation.keys())
             tracked_signers.update(self.seen_signers)
             tracked_signers.update(state.signers)
@@ -1095,6 +1106,45 @@ class Detector:
             if commit.commit_txid == winner_txid:
                 return commit.apparent_sender
         return None
+
+    def _winner_parent_burn_block(
+        self, round_state: SortitionRoundState
+    ) -> Optional[int]:
+        if not round_state.winner_txid:
+            return None
+        for commit in round_state.commits:
+            if commit.commit_txid == round_state.winner_txid:
+                return commit.parent_burn_block
+        return None
+
+    def _warn_on_sortition_parent_burn_mismatch(
+        self,
+        round_state: SortitionRoundState,
+        burn_height: int,
+        alerts: List[Alert],
+        ts: float,
+    ) -> None:
+        if round_state.null_miner_won or not round_state.winner_txid:
+            return
+        last_accepted_burn = self.last_accepted_proposal_burn_height
+        if not isinstance(last_accepted_burn, int):
+            return
+        parent_burn_block = self._winner_parent_burn_block(round_state)
+        if parent_burn_block is None:
+            return
+        if parent_burn_block == last_accepted_burn:
+            return
+        self._emit_alert(
+            alerts=alerts,
+            key="sortition-parent-burn-mismatch-%d" % burn_height,
+            severity="warning",
+            message=(
+                "Sortition winner at burn height %d committed to parent_burn_block=%d "
+                "but last accepted proposal burn height is %d"
+                % (burn_height, parent_burn_block, last_accepted_burn)
+            ),
+            ts=ts,
+        )
 
     def _burn_block_alert_message(self, burn_height: int, event: ParsedEvent) -> str:
         sortition_state = "not_observed"

@@ -447,29 +447,16 @@ DASHBOARD_HTML = """<!doctype html>
         const ageText = latestTs ? fmtAge(Math.max(0, nowEpoch - latestTs)) : "";
         const commitHtml = commits.length
           ? commits.map((item) => {
-              const hasHeight = item.stacks_block_height !== null && item.stacks_block_height !== undefined;
-              const burnHeight = item.stacks_block_burn_height;
-              const blockHash = item.stacks_block_hash || "-";
-              let blockTarget = String(blockHash);
-              if (hasHeight) {
-                blockTarget += " (h=" + item.stacks_block_height + ")";
-              }
-              if (burnHeight !== null && burnHeight !== undefined) {
-                blockTarget += " (burn=" + burnHeight + ")";
-              }
-              const targetLabel = escapeHtml(shortHash(blockTarget, 36));
               const commitClass = item.is_winner ? "commit commit-winner" : "commit";
               const address = item.apparent_sender || "";
               const commitLabel = escapeHtml(shortHash(item.commit_txid, 20));
               const addressHtml = address ? mempoolAddressLink(address) : "-";
               const commitLink = item.commit_txid ? mempoolTxLink(item.commit_txid, commitLabel) : "-";
-              const targetLink = item.stacks_block_hash
-                ? hiroBlockHashLink(item.stacks_block_hash, targetLabel)
-                : targetLabel;
-              const burnLink = burnHeight !== null && burnHeight !== undefined
-                ? " burn=" + hiroBtcBlockLink(burnHeight, escapeHtml(burnHeight))
-                : "";
-              return "<div class='" + commitClass + "'><div class='mono'>" + addressHtml + "</div><div class='mono'>commit " + commitLink + "</div><div class='mono'>target " + targetLink + burnLink + "</div></div>";
+              const parentBurn = item.parent_burn_block;
+              const parentBurnLabel = parentBurn !== null && parentBurn !== undefined
+                ? hiroBtcBlockLink(parentBurn, escapeHtml(parentBurn))
+                : "-";
+              return "<div class='" + commitClass + "'><div class='mono'>" + addressHtml + "</div><div class='mono'>commit " + commitLink + "</div><div class='mono'>parent burn block " + parentBurnLabel + "</div></div>";
             }).join("")
           : "<div class='commit'>No commits captured for this burn height.</div>";
         const burnLabel = "Burn #" + escapeHtml(round.burn_height);

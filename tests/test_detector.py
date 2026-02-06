@@ -176,6 +176,129 @@ class TestDetector(unittest.TestCase):
         keys = {alert.key for alert in alerts}
         self.assertNotIn("proposal-timeout-%s" % signature_hash, keys)
 
+    def test_weight_sample_requires_signature_weight(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_acceptance",
+                ts=100.0,
+                fields={
+                    "signer_signature_hash": "weightjump",
+                    "signer_pubkey": "pub1",
+                    "total_weight_approved": 600,
+                    "total_weight": 1000,
+                    "percent_approved": 60.0,
+                },
+            )
+        )
+        self.assertEqual(len(detector.signer_weight_samples.get("pub1", [])), 0)
+
+    def test_signature_weight_used_for_samples(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_acceptance",
+                ts=100.0,
+                fields={
+                    "signer_signature_hash": "sig1",
+                    "signer_pubkey": "pub1",
+                    "signature_weight": 42,
+                    "total_weight_approved": 200,
+                    "total_weight": 1000,
+                },
+            )
+        )
+        self.assertEqual(detector.signer_weight_samples["pub1"][-1], 42)
+
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_rejection",
+                ts=101.0,
+                fields={
+                    "signer_signature_hash": "sig2",
+                    "signer_pubkey": "pub2",
+                    "signature_weight": 55,
+                    "total_weight": 1000,
+                    "percent_rejected": 5.0,
+                },
+            )
+        )
+        self.assertEqual(detector.signer_weight_samples["pub2"][-1], 55)
+
+    def test_sortition_parent_burn_mismatch_warns(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        signature_hash = "abcd1234"
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_proposal",
+                ts=100.0,
+                fields={
+                    "signer_signature_hash": signature_hash,
+                    "burn_height": 100,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_pushed",
+                ts=101.0,
+                fields={
+                    "signer_signature_hash": signature_hash,
+                    "block_height": 1,
+                },
+            )
+        )
+
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_leader_block_commit",
+                ts=110.0,
+                fields={
+                    "burn_height": 105,
+                    "commit_txid": "tx1",
+                    "apparent_sender": "bc1qqq",
+                    "stacks_block_hash": "abcd",
+                    "parent_burn_block": 99,
+                },
+            )
+        )
+
+        alerts = detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_sortition_winner_selected",
+                ts=111.0,
+                fields={
+                    "burn_height": 105,
+                    "winner_txid": "tx1",
+                    "winning_stacks_block_hash": "abcd",
+                },
+            )
+        )
+        keys = {alert.key for alert in alerts}
+        self.assertIn("sortition-parent-burn-mismatch-105", keys)
+
     def test_new_block_event_closes_proposal_and_updates_heights(self) -> None:
         detector = Detector(
             DetectorConfig(

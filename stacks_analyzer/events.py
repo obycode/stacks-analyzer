@@ -460,6 +460,7 @@ class LogParser:
                 signature_hash = extract_field(line, "signer_signature_hash")
                 total_weight_approved = extract_field(line, "total_weight_approved")
                 total_weight = extract_field(line, "total_weight")
+                signature_weight = extract_field(line, "signature_weight")
                 percent = extract_field(line, "percent_approved")
                 block_height = extract_field(line, "block_height")
                 events.append(
@@ -474,6 +475,9 @@ class LogParser:
                             if total_weight_approved
                             else None,
                             "total_weight": int(total_weight) if total_weight else None,
+                            "signature_weight": int(signature_weight)
+                            if signature_weight
+                            else None,
                             "percent_approved": float(percent) if percent else None,
                             "block_height": int(block_height) if block_height else None,
                             "consensus_hash": extract_field(line, "consensus_hash"),
@@ -486,6 +490,7 @@ class LogParser:
                 signature_hash = extract_field(line, "signer_signature_hash")
                 total_weight_rejected = extract_field(line, "total_weight_rejected")
                 total_weight = extract_field(line, "total_weight")
+                signature_weight = extract_field(line, "signature_weight")
                 percent = extract_field(line, "percent_rejected")
                 block_height = extract_field(line, "block_height")
                 events.append(
@@ -500,6 +505,9 @@ class LogParser:
                             if total_weight_rejected
                             else None,
                             "total_weight": int(total_weight) if total_weight else None,
+                            "signature_weight": int(signature_weight)
+                            if signature_weight
+                            else None,
                             "percent_rejected": float(percent) if percent else None,
                             "block_height": int(block_height) if block_height else None,
                             "consensus_hash": extract_field(line, "consensus_hash"),
@@ -513,6 +521,7 @@ class LogParser:
                 signature_hash = extract_field(line, "signer_signature_hash")
                 total_weight_rejected = extract_field(line, "total_weight_rejected")
                 total_weight = extract_field(line, "total_weight")
+                signature_weight = extract_field(line, "signature_weight")
                 percent = extract_field(line, "percent_rejected")
                 block_height = extract_field(line, "block_height")
                 events.append(
@@ -527,6 +536,9 @@ class LogParser:
                             if total_weight_rejected
                             else None,
                             "total_weight": int(total_weight) if total_weight else None,
+                            "signature_weight": int(signature_weight)
+                            if signature_weight
+                            else None,
                             "percent_rejected": float(percent) if percent else None,
                             "block_height": int(block_height) if block_height else None,
                             "consensus_hash": extract_field(line, "consensus_hash"),
