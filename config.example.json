@@ -19,7 +19,8 @@
     "large_signer_top_n": 3,
     "large_signer_window": 30,
     "large_signer_min_participation": 0.5,
-    "closed_proposal_retention_seconds": 600
+    "closed_proposal_retention_seconds": 600,
+    "burn_block_boundary_window_seconds": 15
   },
   "telegram": {
     "enabled": false,

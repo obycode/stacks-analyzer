@@ -45,6 +45,66 @@ class TestLogParser(unittest.TestCase):
             event.fields["signer_signature_hash"], "aabbccddeeff00112233"
         )
 
+    def test_parse_signer_block_rejection(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 06 04:37:44 host stacks-signer[1]: INFO [1770370664.324761] "
+            "[stacks-signer/src/v0/signer.rs:1743] "
+            "Received block rejection, signer_pubkey: 03abc, "
+            "signer_signature_hash: f98fab, consensus_hash: da98, "
+            "block_height: 6365169, reject_reason: NotLatestSortitionWinner, "
+            "total_weight_rejected: 1273, total_weight: 3912, percent_rejected: 32.5"
+        )
+
+        events = parser.parse_line("signer", line)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.kind, "signer_block_rejection")
+        self.assertEqual(event.fields["signer_pubkey"], "03abc")
+        self.assertEqual(event.fields["signer_signature_hash"], "f98fab")
+        self.assertEqual(event.fields["block_height"], 6365169)
+        self.assertEqual(event.fields["reject_reason"], "NotLatestSortitionWinner")
+        self.assertEqual(event.fields["total_weight_rejected"], 1273)
+        self.assertEqual(event.fields["total_weight"], 3912)
+        self.assertAlmostEqual(event.fields["percent_rejected"], 32.5)
+
+    def test_parse_signer_burn_block_event(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 06 04:37:47 host stacks-signer[1]: INFO [1770370667.167988] "
+            "[stacks-signer/src/v0/signer.rs:616] "
+            "Received a new burn block event for block height 935235"
+        )
+
+        events = parser.parse_line("signer", line)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].kind, "signer_burn_block_event")
+        self.assertEqual(events[0].fields["burn_height"], 935235)
+
+    def test_parse_signer_rejection_threshold_reached(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 06 04:37:44 host stacks-signer[1]: INFO [1770370664.324761] "
+            "[stacks-signer/src/v0/signer.rs:1755] "
+            "Received block rejection and have reached the rejection threshold, "
+            "signer_pubkey: 03def, signer_signature_hash: f98fab, "
+            "consensus_hash: da98, block_height: 6365169, "
+            "reject_reason: NotLatestSortitionWinner, "
+            "total_weight_rejected: 1273, total_weight: 3912, percent_rejected: 32.5"
+        )
+
+        events = parser.parse_line("signer", line)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.kind, "signer_rejection_threshold_reached")
+        self.assertEqual(event.fields["signer_pubkey"], "03def")
+        self.assertEqual(event.fields["signer_signature_hash"], "f98fab")
+        self.assertEqual(event.fields["block_height"], 6365169)
+        self.assertEqual(event.fields["reject_reason"], "NotLatestSortitionWinner")
+        self.assertEqual(event.fields["total_weight_rejected"], 1273)
+        self.assertEqual(event.fields["total_weight"], 3912)
+        self.assertAlmostEqual(event.fields["percent_rejected"], 32.5)
+
     def test_parse_node_winning_commit_and_tenure_events(self) -> None:
         parser = LogParser()
         winning_line = (

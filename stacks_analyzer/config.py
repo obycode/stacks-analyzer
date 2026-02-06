@@ -110,6 +110,12 @@ def build_service_config(raw: Optional[Dict[str, Any]]) -> ServiceConfig:
                 DetectorConfig.proposal_history_size,
             )
         ),
+        burn_block_boundary_window_seconds=int(
+            detector_payload.get(
+                "burn_block_boundary_window_seconds",
+                DetectorConfig.burn_block_boundary_window_seconds,
+            )
+        ),
     )
 
     telegram_payload = payload.get("telegram", {})

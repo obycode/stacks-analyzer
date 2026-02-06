@@ -29,6 +29,9 @@ SORTITION_WINNER_REJECTED_RE = re.compile(
     r"SORTITION\((?P<burn_height>\d+)\):\s+WINNER REJECTED:\s+\"(?P<reason>[^\"]+)\",\s+"
     r"txid:\s+(?P<txid>[0-9a-fA-F]+),\s+stacks_block_hash:\s+(?P<stacks_block_hash>[0-9a-fA-F]+)"
 )
+SIGNER_BURN_BLOCK_EVENT_RE = re.compile(
+    r"Received a new burn block event for block height\s+(?P<burn_height>\d+)"
+)
 
 
 def extract_timestamp(line: str) -> float:
@@ -351,6 +354,24 @@ class LogParser:
                     )
                 )
 
+            if "Received a new burn block event for block height" in line:
+                burn_match = SIGNER_BURN_BLOCK_EVENT_RE.search(line)
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_burn_block_event",
+                        ts=ts,
+                        fields={
+                            "burn_height": (
+                                int(burn_match.group("burn_height"))
+                                if burn_match
+                                else None
+                            )
+                        },
+                        line=line,
+                    )
+                )
+
             if "Received block acceptance" in line:
                 signature_hash = extract_field(line, "signer_signature_hash")
                 total_weight_approved = extract_field(line, "total_weight_approved")
@@ -372,6 +393,60 @@ class LogParser:
                             "percent_approved": float(percent) if percent else None,
                             "block_height": int(block_height) if block_height else None,
                             "consensus_hash": extract_field(line, "consensus_hash"),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "Received block rejection and have reached the rejection threshold" in line:
+                signature_hash = extract_field(line, "signer_signature_hash")
+                total_weight_rejected = extract_field(line, "total_weight_rejected")
+                total_weight = extract_field(line, "total_weight")
+                percent = extract_field(line, "percent_rejected")
+                block_height = extract_field(line, "block_height")
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_rejection_threshold_reached",
+                        ts=ts,
+                        fields={
+                            "signer_signature_hash": signature_hash,
+                            "signer_pubkey": extract_field(line, "signer_pubkey"),
+                            "total_weight_rejected": int(total_weight_rejected)
+                            if total_weight_rejected
+                            else None,
+                            "total_weight": int(total_weight) if total_weight else None,
+                            "percent_rejected": float(percent) if percent else None,
+                            "block_height": int(block_height) if block_height else None,
+                            "consensus_hash": extract_field(line, "consensus_hash"),
+                            "reject_reason": extract_field(line, "reject_reason"),
+                        },
+                        line=line,
+                    )
+                )
+
+            elif "Received block rejection" in line:
+                signature_hash = extract_field(line, "signer_signature_hash")
+                total_weight_rejected = extract_field(line, "total_weight_rejected")
+                total_weight = extract_field(line, "total_weight")
+                percent = extract_field(line, "percent_rejected")
+                block_height = extract_field(line, "block_height")
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_block_rejection",
+                        ts=ts,
+                        fields={
+                            "signer_signature_hash": signature_hash,
+                            "signer_pubkey": extract_field(line, "signer_pubkey"),
+                            "total_weight_rejected": int(total_weight_rejected)
+                            if total_weight_rejected
+                            else None,
+                            "total_weight": int(total_weight) if total_weight else None,
+                            "percent_rejected": float(percent) if percent else None,
+                            "block_height": int(block_height) if block_height else None,
+                            "consensus_hash": extract_field(line, "consensus_hash"),
+                            "reject_reason": extract_field(line, "reject_reason"),
                         },
                         line=line,
                     )

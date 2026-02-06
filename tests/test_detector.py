@@ -622,6 +622,102 @@ class TestDetector(unittest.TestCase):
         self.assertFalse(rejected_row["is_open"])
         self.assertEqual(snapshot["open_proposals_count"], 0)
 
+    def test_rejection_threshold_finalizes_proposal(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        signature_hash = "reject30"
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_proposal",
+                ts=100.0,
+                fields={
+                    "signer_signature_hash": signature_hash,
+                    "block_height": 10,
+                    "burn_height": 100,
+                    "consensus_hash": "aa",
+                },
+            )
+        )
+        alerts = detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_rejection",
+                ts=101.0,
+                fields={
+                    "signer_signature_hash": signature_hash,
+                    "signer_pubkey": "pub1",
+                    "reject_reason": "NotLatestSortitionWinner",
+                    "percent_rejected": 30.1,
+                    "total_weight_rejected": 301,
+                    "total_weight": 1000,
+                },
+            )
+        )
+        keys = {alert.key for alert in alerts}
+        self.assertIn("proposal-reject-threshold-%s" % signature_hash, keys)
+        self.assertNotIn(signature_hash, detector.proposals)
+        self.assertEqual(detector.completed_proposals, 1)
+        self.assertEqual(
+            detector.proposal_reject_reasons.get(signature_hash),
+            "NotLatestSortitionWinner",
+        )
+
+    def test_burn_boundary_rejection_alert(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+                burn_block_boundary_window_seconds=10,
+            )
+        )
+        signature_hash = "boundary01"
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_proposal",
+                ts=100.0,
+                fields={
+                    "signer_signature_hash": signature_hash,
+                    "block_height": 10,
+                    "burn_height": 100,
+                    "consensus_hash": "aa",
+                },
+            )
+        )
+        alerts = detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_rejection_threshold_reached",
+                ts=101.0,
+                fields={
+                    "signer_signature_hash": signature_hash,
+                    "signer_pubkey": "pub1",
+                    "reject_reason": "NotLatestSortitionWinner",
+                    "percent_rejected": 35.0,
+                    "total_weight_rejected": 350,
+                    "total_weight": 1000,
+                },
+            )
+        )
+        alerts2 = detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_state_machine_update",
+                ts=105.0,
+                fields={
+                    "burn_height": 101,
+                    "burn_block": "bb",
+                },
+            )
+        )
+        keys = {alert.key for alert in alerts} | {alert.key for alert in alerts2}
+        self.assertIn("proposal-reject-boundary-%s" % signature_hash, keys)
+
     def test_signer_block_response_rejection_is_info(self) -> None:
         detector = Detector(
             DetectorConfig(
