@@ -4,11 +4,14 @@ import queue
 import signal
 import threading
 import time
+import datetime
+import subprocess
 from typing import Any, Deque, Dict, Optional, Set
 
 from .config import ServiceConfig
 from .detector import Alert, Detector
 from .events import LogParser, extract_timestamp
+from .history import HistoryStore, should_store_event
 from .sources import spawn_source_threads
 from .telegram import TelegramNotifier
 from .web import DashboardServer
@@ -50,6 +53,12 @@ class MonitoringService:
         self.state_lock = threading.Lock()
         self.recent_alerts: Deque[Dict[str, Any]] = deque(maxlen=200)
         self.recent_reports: Deque[Dict[str, Any]] = deque(maxlen=200)
+        self.history_store: Optional[HistoryStore] = None
+        if config.history.enabled:
+            self.history_store = HistoryStore(
+                path=config.history.path,
+                retention_hours=config.history.retention_hours,
+            )
 
         self.notifier: Optional[TelegramNotifier] = None
         if config.telegram.enabled:
@@ -61,6 +70,11 @@ class MonitoringService:
                 host=config.web.host,
                 port=config.web.port,
                 state_provider=self._dashboard_state,
+                history_provider=self._history_api if self.history_store else None,
+                alerts_provider=self._alerts_api if self.history_store else None,
+                reports_provider=self._reports_api if self.history_store else None,
+                report_provider=self._report_api if self.history_store else None,
+                report_logs_provider=self._report_logs_api if self.history_store else None,
             )
 
         signal.signal(signal.SIGINT, self._handle_stop)
@@ -124,6 +138,8 @@ class MonitoringService:
         finally:
             if self.dashboard_server is not None:
                 self.dashboard_server.stop()
+            if self.history_store is not None:
+                self.history_store.close()
 
     def _run_files_once_merged(self) -> int:
         node_handle = (
@@ -190,10 +206,10 @@ class MonitoringService:
                     self.detector.suppress_alerts = False
             return
 
+        events = self.parser.parse_line(source, line)
+        alert_batch = []
         with self.state_lock:
             self.detector.process_line(source)
-            events = self.parser.parse_line(source, line)
-            alert_batch = []
             for event in events:
                 if self.latest_event_ts is None:
                     self.latest_event_ts = event.ts
@@ -209,6 +225,16 @@ class MonitoringService:
                 if self.replay_clock_enabled and self.replay_event_base_ts is None:
                     self.replay_event_base_ts = event.ts
                 alert_batch.extend(self.detector.process_event(event))
+        if self.history_store is not None:
+            for event in events:
+                if should_store_event(event.kind, event.fields):
+                    self.history_store.record_event(
+                        ts=event.ts,
+                        source=event.source,
+                        kind=event.kind,
+                        data=event.fields,
+                        line=event.line,
+                    )
         self._publish_alerts(alert_batch)
 
     def _run_periodic(self, force_report: bool = False) -> None:
@@ -222,8 +248,6 @@ class MonitoringService:
         self._publish_alerts(alerts)
 
         if report:
-            with self.state_lock:
-                self.recent_reports.append({"ts": now, "report": report})
             print(report, flush=True)
             self._write_report(report)
             if (
@@ -245,6 +269,8 @@ class MonitoringService:
             self._publish_alert(alert)
 
     def _publish_alert(self, alert: Alert) -> None:
+        snapshot: Optional[Dict[str, Any]] = None
+        recent_rejections: Optional[list] = None
         with self.state_lock:
             self.recent_alerts.append(
                 {
@@ -254,14 +280,179 @@ class MonitoringService:
                     "message": alert.message,
                 }
             )
+            if self.history_store is not None and alert.severity in ("warning", "critical"):
+                snapshot = self.detector.snapshot(now=alert.ts)
+                recent_rejections = list(self.detector.recent_rejections)
         rendered = "[ALERT][%s] %s" % (alert.severity.upper(), alert.message)
         print(rendered, flush=True)
+        if self.history_store is not None:
+            alert_id = self.history_store.record_alert(
+                ts=alert.ts,
+                severity=alert.severity,
+                key=alert.key,
+                message=alert.message,
+            )
+            if alert.severity in ("warning", "critical"):
+                recent_events = self.history_store.report_context_events(alert.ts)
+                report_payload = {
+                    "alert": {
+                        "ts": alert.ts,
+                        "severity": alert.severity,
+                        "key": alert.key,
+                        "message": alert.message,
+                    },
+                    "snapshot": snapshot,
+                    "recent_events": recent_events,
+                    "recent_alerts": list(self.recent_alerts)[-20:],
+                    "recent_rejections": recent_rejections,
+                }
+                report_id = self.history_store.create_report(
+                    ts=alert.ts,
+                    severity=alert.severity,
+                    alert_key=alert.key,
+                    summary=alert.message,
+                    data=report_payload,
+                )
+                self.history_store.attach_report(alert_id, report_id)
+                with self.state_lock:
+                    self.recent_reports.append(
+                        {
+                            "ts": alert.ts,
+                            "report_id": report_id,
+                            "alert_key": alert.key,
+                            "severity": alert.severity,
+                            "summary": alert.message,
+                        }
+                    )
         if (
             self.notifier
             and not self.suppress_notifications
             and self._should_notify_telegram_for_alert(alert)
         ):
             self.notifier.send(rendered)
+
+    def _history_api(self, params: Dict[str, list]) -> Dict[str, Any]:
+        if self.history_store is None:
+            return {"events": []}
+        from_ts = _float_query_param(params, "from")
+        to_ts = _float_query_param(params, "to")
+        kinds = params.get("kind") or params.get("kinds")
+        limit = _int_query_param(params, "limit", 200)
+        events = self.history_store.query_events(
+            from_ts=from_ts,
+            to_ts=to_ts,
+            kinds=kinds,
+            limit=limit,
+        )
+        return {"events": events}
+
+    def _alerts_api(self, params: Dict[str, list]) -> Dict[str, Any]:
+        if self.history_store is None:
+            return {"alerts": []}
+        from_ts = _float_query_param(params, "from")
+        to_ts = _float_query_param(params, "to")
+        severities = params.get("severity") or params.get("severities")
+        limit = _int_query_param(params, "limit", 200)
+        alerts = self.history_store.query_alerts(
+            from_ts=from_ts,
+            to_ts=to_ts,
+            severities=severities,
+            limit=limit,
+        )
+        return {"alerts": alerts}
+
+    def _reports_api(self, params: Dict[str, list]) -> Dict[str, Any]:
+        if self.history_store is None:
+            return {"reports": []}
+        from_ts = _float_query_param(params, "from")
+        to_ts = _float_query_param(params, "to")
+        severities = params.get("severity") or params.get("severities")
+        limit = _int_query_param(params, "limit", 100)
+        reports = self.history_store.list_reports(
+            from_ts=from_ts,
+            to_ts=to_ts,
+            severities=severities,
+            limit=limit,
+        )
+        return {"reports": reports}
+
+    def _report_api(self, params: Dict[str, list]) -> Dict[str, Any]:
+        if self.history_store is None:
+            return {"report": None}
+        report_id = _int_query_param(params, "id", None)
+        if report_id is None:
+            return {"report": None}
+        report = self.history_store.get_report(report_id)
+        return {"report": report}
+
+    def _report_logs_api(self, params: Dict[str, list]) -> Dict[str, Any]:
+        if self.history_store is None:
+            return {"status": 404, "content": "history disabled\n"}
+        if self.config.mode != "journalctl":
+            return {
+                "status": 400,
+                "content": "log download only supported in journalctl mode\n",
+            }
+        report_id = _int_query_param(params, "id", None)
+        if report_id is None:
+            return {"status": 400, "content": "missing report id\n"}
+        report = self.history_store.get_report(report_id)
+        if report is None:
+            return {"status": 404, "content": "report not found\n"}
+        before = _int_query_param(
+            params,
+            "before",
+            self.config.history.report_log_window_before_seconds,
+        )
+        after = _int_query_param(
+            params,
+            "after",
+            self.config.history.report_log_window_after_seconds,
+        )
+        ts = report.get("ts")
+        if not isinstance(ts, (int, float)):
+            return {"status": 400, "content": "report missing timestamp\n"}
+        start_ts = float(ts) - float(before)
+        end_ts = float(ts) + float(after)
+        try:
+            log_text = self._fetch_journal_logs(start_ts, end_ts)
+        except RuntimeError as exc:
+            return {"status": 500, "content": "%s\n" % exc}
+        filename = "report-%s-logs.txt" % report_id
+        return {"status": 200, "filename": filename, "content": log_text}
+
+    def _fetch_journal_logs(self, start_ts: float, end_ts: float) -> str:
+        units = []
+        if self.config.node_journal_unit:
+            units.append(self.config.node_journal_unit)
+        if self.config.signer_journal_unit:
+            units.append(self.config.signer_journal_unit)
+        if not units:
+            raise RuntimeError("no journalctl units configured")
+        start = datetime.datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M:%S")
+        end = datetime.datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M:%S")
+        cmd = ["journalctl"]
+        for unit in units:
+            cmd.extend(["-u", unit])
+        cmd.extend(["--since", start, "--until", end, "--no-pager", "--output=short-iso"])
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError("failed to run journalctl: %s" % exc)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "journalctl failed")
+        header = (
+            "journalctl units: %s\nwindow: %s -> %s\n\n"
+            % (", ".join(units), start, end)
+        )
+        return header + result.stdout
+
 
     def _should_notify_telegram_for_alert(self, alert: Alert) -> bool:
         minimum = ALERT_SEVERITY_RANK.get(
@@ -334,3 +525,25 @@ class MonitoringService:
                 flush=True,
             )
             return {}
+
+
+def _float_query_param(params: Dict[str, list], name: str) -> Optional[float]:
+    values = params.get(name)
+    if not values:
+        return None
+    try:
+        return float(values[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_query_param(
+    params: Dict[str, list], name: str, default: Optional[int] = None
+) -> Optional[int]:
+    values = params.get(name)
+    if not values:
+        return default
+    try:
+        return int(values[0])
+    except (TypeError, ValueError):
+        return default

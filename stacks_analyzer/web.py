@@ -3,6 +3,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
+from urllib.parse import parse_qs
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -171,6 +172,14 @@ DASHBOARD_HTML = """<!doctype html>
       background: rgba(148, 163, 184, 0.15);
       border-color: rgba(148, 163, 184, 0.35);
     }
+    .percent-accept {
+      color: #86efac;
+      font-weight: 600;
+    }
+    .percent-reject {
+      color: #fca5a5;
+      font-weight: 600;
+    }
     .link {
       color: #bae6fd;
       text-decoration: none;
@@ -309,6 +318,16 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
 
     <div class="card">
+      <div class="panel-title">Recent Reports</div>
+      <table>
+        <thead>
+          <tr><th>Time</th><th>Severity</th><th>Alert</th><th>Report</th></tr>
+        </thead>
+        <tbody id="reportsBody"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
       <div class="panel-title">Counters</div>
       <table>
         <tbody id="countsBody"></tbody>
@@ -345,8 +364,11 @@ DASHBOARD_HTML = """<!doctype html>
       return text.slice(0, size) + "...";
     }
 
-    function linkTo(url, label) {
-      return "<a class='link' href='" + url + "' target='_blank' rel='noopener noreferrer'>" + label + "</a>";
+    function linkTo(url, label, newTab = true) {
+      if (newTab) {
+        return "<a class='link' href='" + url + "' target='_blank' rel='noopener noreferrer'>" + label + "</a>";
+      }
+      return "<a class='link' href='" + url + "'>" + label + "</a>";
     }
 
     function mempoolAddressLink(address) {
@@ -503,6 +525,20 @@ DASHBOARD_HTML = """<!doctype html>
         return "<tr><td>" + escapeHtml(new Date(item.ts * 1000).toLocaleTimeString()) + "</td><td><span class='" + sevClass + "'>" + escapeHtml(sev) + "</span></td><td>" + linkifyAlertMessage(item) + "</td></tr>";
       }).join("");
 
+      const reports = data.recent_reports || [];
+      const reportsBody = document.getElementById("reportsBody");
+      if (!reports.length) {
+        reportsBody.innerHTML = "<tr><td colspan='4'>No reports yet.</td></tr>";
+      } else {
+        reportsBody.innerHTML = reports.slice().reverse().slice(0, 20).map((item) => {
+          const sev = (item.severity || "ok").toLowerCase();
+          const sevClass = "sev sev-" + (sev === "warning" ? "warning" : sev === "critical" ? "critical" : sev === "info" ? "info" : "ok");
+          const reportId = item.report_id;
+          const reportLink = reportId ? linkTo("/report?id=" + encodeURIComponent(reportId), "view", false) : "-";
+          return "<tr><td>" + escapeHtml(new Date(item.ts * 1000).toLocaleTimeString()) + "</td><td><span class='" + sevClass + "'>" + escapeHtml(sev) + "</span></td><td>" + escapeHtml(item.alert_key || "-") + "</td><td>" + reportLink + "</td></tr>";
+        }).join("");
+      }
+
       const signers = data.signers || data.large_signers || [];
       document.getElementById("signersBody").innerHTML = signers.map((item) => {
         const name = item.name ? escapeHtml(item.name) : "-";
@@ -540,7 +576,10 @@ DASHBOARD_HTML = """<!doctype html>
         const blockLink = (status === "approved" && blockHeight !== "-")
           ? hiroBlockLink(blockHeight, escapeHtml(blockHeight))
           : escapeHtml(blockHeight);
-        return "<tr class='" + rowClass + "'><td class='mono'><button class='hash-btn mono' data-copy-hash='" + escapeHtml(item.signature_hash) + "' title='Copy full hash'>" + label + "</button></td><td><span class='" + statusClass + "'>" + statusLabel + "</span></td><td>" + blockLink + "</td><td>" + fmtAge(item.age_seconds) + "</td><td>" + Number(item.max_percent_observed || 0).toFixed(1) + "%</td><td>" + (item.threshold_seen ? "yes" : "no") + "</td></tr>";
+        const maxAccepted = Number(item.max_percent_observed || 0).toFixed(1);
+        const maxRejected = Number(item.max_reject_percent || 0).toFixed(1);
+        const maxSeen = "<span class='percent-accept'>" + maxAccepted + "%</span> <span class='percent-reject'>" + maxRejected + "%</span>";
+        return "<tr class='" + rowClass + "'><td class='mono'><button class='hash-btn mono' data-copy-hash='" + escapeHtml(item.signature_hash) + "' title='Copy full hash'>" + label + "</button></td><td><span class='" + statusClass + "'>" + statusLabel + "</span></td><td>" + blockLink + "</td><td>" + fmtAge(item.age_seconds) + "</td><td>" + maxSeen + "</td><td>" + (item.threshold_seen ? "yes" : "no") + "</td></tr>";
       }).join("");
       }
 
@@ -596,7 +635,260 @@ DASHBOARD_HTML = """<!doctype html>
 """
 
 
-def build_handler(state_provider: Callable[[], Dict[str, Any]]) -> type:
+REPORT_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stacks Analyzer Report</title>
+  <style>
+    :root {
+      --bg-0: #081018;
+      --bg-1: #11253d;
+      --card: rgba(16, 26, 36, 0.72);
+      --line: rgba(148, 163, 184, 0.25);
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --critical: #ef4444;
+      --info: #38bdf8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 520px at -10% -20%, #1f4f80 0%, transparent 60%),
+        radial-gradient(900px 420px at 115% -20%, #3d1a63 0%, transparent 62%),
+        linear-gradient(180deg, var(--bg-1), var(--bg-0));
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 28px 24px 48px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 18px;
+    }
+    h1 {
+      font-size: 22px;
+      margin: 0;
+      letter-spacing: 0.03em;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px 18px;
+      margin-bottom: 16px;
+      box-shadow: 0 20px 40px rgba(15, 23, 42, 0.25);
+    }
+    .muted { color: var(--muted); }
+    .sev {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 2px 8px;
+      border-radius: 999px;
+      display: inline-block;
+      border: 1px solid var(--line);
+    }
+    .sev-critical { background: rgba(239, 68, 68, 0.18); color: #fecaca; border-color: rgba(239, 68, 68, 0.4); }
+    .sev-warning { background: rgba(245, 158, 11, 0.18); color: #fde68a; border-color: rgba(245, 158, 11, 0.4); }
+    .sev-info { background: rgba(56, 189, 248, 0.18); color: #bae6fd; border-color: rgba(56, 189, 248, 0.4); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .grid .card { margin-bottom: 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      padding: 8px 6px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    .link {
+      color: #bae6fd;
+      text-decoration: none;
+    }
+    .link:hover { text-decoration: underline; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(56, 189, 248, 0.45);
+      background: rgba(56, 189, 248, 0.18);
+      color: #bae6fd;
+      text-decoration: none;
+      font-size: 12px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .btn:hover {
+      background: rgba(56, 189, 248, 0.28);
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 12px;
+      color: #e2e8f0;
+    }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <h1>Alert Report</h1>
+      <a class="link" href="/">Back to dashboard</a>
+    </div>
+    <div class="card" id="summaryCard">
+      <div class="muted">Loading report...</div>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h2 style="font-size:14px; margin:0 0 8px;">Snapshot</h2>
+        <pre id="snapshotBody"></pre>
+      </div>
+      <div class="card">
+        <h2 style="font-size:14px; margin:0 0 8px;">Recent Alerts</h2>
+        <div id="alertsBody"></div>
+      </div>
+      <div class="card">
+        <h2 style="font-size:14px; margin:0 0 8px;">Recent Rejections</h2>
+        <div id="rejectionsBody"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2 style="font-size:14px; margin:0 0 8px;">Recent Events</h2>
+      <div id="eventsBody"></div>
+    </div>
+  </div>
+  <script>
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+    function sevClass(sev) {
+      const lower = (sev || "info").toLowerCase();
+      return "sev sev-" + (lower === "warning" ? "warning" : lower === "critical" ? "critical" : "info");
+    }
+    function fmtTime(ts) {
+      if (!ts) return "-";
+      return new Date(ts * 1000).toLocaleString();
+    }
+    function linkTo(url, label) {
+      return "<a class='link' href='" + url + "'>" + label + "</a>";
+    }
+
+    function renderReport(report) {
+      if (!report) {
+        document.getElementById("summaryCard").innerHTML = "<div class='muted'>Report not found.</div>";
+        return;
+      }
+      const alert = report.data && report.data.alert ? report.data.alert : {};
+      const summary = report.summary || "-";
+      document.getElementById("summaryCard").innerHTML =
+        "<div style='display:flex; justify-content:space-between; gap:12px; align-items:center;'>" +
+        "<div><div class='muted'>Alert</div><div style='margin-top:4px;'>" + escapeHtml(summary) + "</div>" +
+        "<div class='muted' style='margin-top:6px; font-size:12px;'>Key: " + escapeHtml(alert.key || report.alert_key || "-") + "</div>" +
+        "</div>" +
+        "<div style='text-align:right;'><div class='" + sevClass(alert.severity || report.severity) + "'>" + escapeHtml(alert.severity || report.severity) + "</div>" +
+        "<div class='muted' style='margin-top:6px; font-size:12px;'>Time: " + escapeHtml(fmtTime(report.ts)) + "</div>" +
+        "<div style='margin-top:10px;'><a class='btn' href='/api/report-logs?id=" + encodeURIComponent(report.id) + "'>Download Logs</a></div>" +
+        "</div>" +
+        "</div>";
+
+      const snapshot = report.data && report.data.snapshot ? report.data.snapshot : null;
+      document.getElementById("snapshotBody").textContent = snapshot ? JSON.stringify(snapshot, null, 2) : "n/a";
+
+      const alerts = (report.data && report.data.recent_alerts) || [];
+      if (!alerts.length) {
+        document.getElementById("alertsBody").innerHTML = "<div class='muted'>No alerts captured.</div>";
+      } else {
+        document.getElementById("alertsBody").innerHTML = "<table><thead><tr><th>Time</th><th>Severity</th><th>Message</th></tr></thead><tbody>" +
+          alerts.map((item) => {
+            return "<tr><td>" + escapeHtml(fmtTime(item.ts)) + "</td><td><span class='" + sevClass(item.severity) + "'>" + escapeHtml(item.severity) + "</span></td><td>" + escapeHtml(item.message || "") + "</td></tr>";
+          }).join("") +
+          "</tbody></table>";
+      }
+
+      const rejections = (report.data && report.data.recent_rejections) || [];
+      if (!rejections.length) {
+        document.getElementById("rejectionsBody").innerHTML = "<div class='muted'>No rejections captured.</div>";
+      } else {
+        document.getElementById("rejectionsBody").innerHTML = "<table><thead><tr><th>Sig</th><th>Reject%</th><th>Accept%</th><th>Reason</th></tr></thead><tbody>" +
+          rejections.map((item) => {
+            return "<tr><td class='mono'>" + escapeHtml((item.signature_hash || "").slice(0, 12)) + "</td><td>" + escapeHtml(item.max_reject_percent || 0) + "</td><td>" + escapeHtml(item.max_approved_percent || 0) + "</td><td>" + escapeHtml(item.reject_reason || "-") + "</td></tr>";
+          }).join("") +
+          "</tbody></table>";
+      }
+
+      const events = (report.data && report.data.recent_events) || [];
+      if (!events.length) {
+        document.getElementById("eventsBody").innerHTML = "<div class='muted'>No events captured.</div>";
+      } else {
+        document.getElementById("eventsBody").innerHTML = "<table><thead><tr><th>Time</th><th>Kind</th><th>Source</th><th>Details</th></tr></thead><tbody>" +
+          events.map((item) => {
+            const details = item.data ? JSON.stringify(item.data) : (item.line || "");
+            return "<tr><td>" + escapeHtml(fmtTime(item.ts)) + "</td><td class='mono'>" + escapeHtml(item.kind || "") + "</td><td>" + escapeHtml(item.source || "") + "</td><td><pre>" + escapeHtml(details) + "</pre></td></tr>";
+          }).join("") +
+          "</tbody></table>";
+      }
+    }
+
+    async function load() {
+      const params = new URLSearchParams(window.location.search);
+      const id = params.get("id");
+      if (!id) {
+        document.getElementById("summaryCard").innerHTML = "<div class='muted'>Missing report id.</div>";
+        return;
+      }
+      const response = await fetch("/api/report?id=" + encodeURIComponent(id), { cache: "no-store" });
+      if (!response.ok) {
+        document.getElementById("summaryCard").innerHTML = "<div class='muted'>Failed to load report.</div>";
+        return;
+      }
+      const payload = await response.json();
+      renderReport(payload.report);
+    }
+
+    load();
+  </script>
+</body>
+</html>
+"""
+
+
+def build_handler(
+    state_provider: Callable[[], Dict[str, Any]],
+    history_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+    alerts_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+    reports_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+    report_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+    report_logs_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+) -> type:
     class DashboardHandler(BaseHTTPRequestHandler):
         def _send_bytes(
             self, payload: bytes, content_type: str, status: int = 200
@@ -617,6 +909,79 @@ def build_handler(state_provider: Callable[[], Dict[str, Any]]) -> type:
                 payload = json.dumps(state_provider(), sort_keys=True).encode("utf-8")
                 self._send_bytes(payload, "application/json; charset=utf-8")
                 return
+            if parsed.path == "/api/history":
+                if history_provider is None:
+                    self._send_bytes(
+                        b"history disabled\n", "text/plain; charset=utf-8", status=404
+                    )
+                    return
+                params = parse_qs(parsed.query)
+                payload = json.dumps(history_provider(params), sort_keys=True).encode("utf-8")
+                self._send_bytes(payload, "application/json; charset=utf-8")
+                return
+            if parsed.path == "/api/alerts":
+                if alerts_provider is None:
+                    self._send_bytes(
+                        b"history disabled\n", "text/plain; charset=utf-8", status=404
+                    )
+                    return
+                params = parse_qs(parsed.query)
+                payload = json.dumps(alerts_provider(params), sort_keys=True).encode("utf-8")
+                self._send_bytes(payload, "application/json; charset=utf-8")
+                return
+            if parsed.path == "/api/reports":
+                if reports_provider is None:
+                    self._send_bytes(
+                        b"history disabled\n", "text/plain; charset=utf-8", status=404
+                    )
+                    return
+                params = parse_qs(parsed.query)
+                payload = json.dumps(reports_provider(params), sort_keys=True).encode("utf-8")
+                self._send_bytes(payload, "application/json; charset=utf-8")
+                return
+            if parsed.path == "/api/report":
+                if report_provider is None:
+                    self._send_bytes(
+                        b"history disabled\n", "text/plain; charset=utf-8", status=404
+                    )
+                    return
+                params = parse_qs(parsed.query)
+                payload = json.dumps(report_provider(params), sort_keys=True).encode("utf-8")
+                self._send_bytes(payload, "application/json; charset=utf-8")
+                return
+            if parsed.path == "/api/report-logs":
+                if report_logs_provider is None:
+                    self._send_bytes(
+                        b"history disabled\n", "text/plain; charset=utf-8", status=404
+                    )
+                    return
+                params = parse_qs(parsed.query)
+                payload = report_logs_provider(params)
+                status = int(payload.get("status", 200))
+                filename = payload.get("filename")
+                content = payload.get("content", "")
+                if not isinstance(content, (bytes, bytearray)):
+                    content = str(content).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                if filename:
+                    self.send_header(
+                        "Content-Disposition",
+                        "attachment; filename=\"%s\"" % filename,
+                    )
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            if parsed.path == "/report":
+                if report_provider is None:
+                    self._send_bytes(
+                        b"history disabled\n", "text/plain; charset=utf-8", status=404
+                    )
+                    return
+                self._send_bytes(REPORT_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                return
             if parsed.path == "/healthz":
                 self._send_bytes(b"ok\n", "text/plain; charset=utf-8")
                 return
@@ -634,15 +999,32 @@ class DashboardServer:
         host: str,
         port: int,
         state_provider: Callable[[], Dict[str, Any]],
+        history_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+        alerts_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+        reports_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+        report_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+        report_logs_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
     ) -> None:
         self.host = host
         self.port = port
         self.state_provider = state_provider
+        self.history_provider = history_provider
+        self.alerts_provider = alerts_provider
+        self.reports_provider = reports_provider
+        self.report_provider = report_provider
+        self.report_logs_provider = report_logs_provider
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        handler = build_handler(self.state_provider)
+        handler = build_handler(
+            self.state_provider,
+            history_provider=self.history_provider,
+            alerts_provider=self.alerts_provider,
+            reports_provider=self.reports_provider,
+            report_provider=self.report_provider,
+            report_logs_provider=self.report_logs_provider,
+        )
         self._server = ThreadingHTTPServer((self.host, self.port), handler)
         self._thread = threading.Thread(
             target=self._server.serve_forever,

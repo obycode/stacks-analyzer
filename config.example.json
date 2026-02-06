@@ -33,5 +33,12 @@
     "enabled": true,
     "host": "127.0.0.1",
     "port": 8787
+  },
+  "history": {
+    "enabled": true,
+    "path": "history.sqlite",
+    "retention_hours": 48,
+    "report_log_window_before_seconds": 600,
+    "report_log_window_after_seconds": 300
   }
 }

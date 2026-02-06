@@ -22,6 +22,15 @@ class WebConfig:
 
 
 @dataclass
+class HistoryConfig:
+    enabled: bool = False
+    path: str = "history.sqlite"
+    retention_hours: int = 48
+    report_log_window_before_seconds: int = 600
+    report_log_window_after_seconds: int = 300
+
+
+@dataclass
 class ServiceConfig:
     mode: str = "files"
     node_log_path: Optional[str] = None
@@ -36,6 +45,7 @@ class ServiceConfig:
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    history: HistoryConfig = field(default_factory=HistoryConfig)
 
 
 def load_json_config(path: str) -> Dict[str, Any]:
@@ -136,6 +146,19 @@ def build_service_config(raw: Optional[Dict[str, Any]]) -> ServiceConfig:
         port=int(web_payload.get("port", 8787)),
     )
 
+    history_payload = payload.get("history", {})
+    history = HistoryConfig(
+        enabled=bool(history_payload.get("enabled", False)),
+        path=str(history_payload.get("path", "history.sqlite")),
+        retention_hours=int(history_payload.get("retention_hours", 48)),
+        report_log_window_before_seconds=int(
+            history_payload.get("report_log_window_before_seconds", 600)
+        ),
+        report_log_window_after_seconds=int(
+            history_payload.get("report_log_window_after_seconds", 300)
+        ),
+    )
+
     return ServiceConfig(
         mode=str(payload.get("mode", "files")),
         node_log_path=payload.get("node_log_path"),
@@ -150,4 +173,5 @@ def build_service_config(raw: Optional[Dict[str, Any]]) -> ServiceConfig:
         detector=detector,
         telegram=telegram,
         web=web,
+        history=history,
     )

@@ -116,6 +116,7 @@ class Detector:
         self.last_tenure_extend_ts: Optional[float] = None
         self.last_accepted_proposal_burn_height: Optional[int] = None
         self.last_accepted_proposal_ts: Optional[float] = None
+        self.last_burn_block_alert_height: Optional[int] = None
         self.tenure_extend_history: Deque[Dict[str, object]] = deque(
             maxlen=self.config.tenure_extend_history_size
         )
@@ -165,28 +166,8 @@ class Detector:
     def process_event(self, event: ParsedEvent) -> List[Alert]:
         alerts: List[Alert] = []
         self.event_counts[event.kind] += 1
-        previous_bitcoin_height = self.current_bitcoin_block_height
         self._update_chain_heights(event.fields)
         self._index_hash_height_from_event(event)
-        if (
-            self.current_bitcoin_block_height is not None
-            and (
-                previous_bitcoin_height is None
-                or self.current_bitcoin_block_height > previous_bitcoin_height
-            )
-        ):
-            self._record_burn_block_event(event.ts, self.current_bitcoin_block_height, alerts)
-            alerts.append(
-                Alert(
-                    key="burn-block-%d" % self.current_bitcoin_block_height,
-                    severity="info",
-                    message=self._burn_block_alert_message(
-                        burn_height=self.current_bitcoin_block_height,
-                        event=event,
-                    ),
-                    ts=event.ts,
-                )
-            )
 
         if event.kind == "node_tip_advanced":
             if self.last_node_tip_ts is not None:
@@ -327,6 +308,23 @@ class Detector:
             burn_height = event.fields.get("burn_height")
             if isinstance(consensus_hash, str) and consensus_hash:
                 self._set_current_consensus(consensus_hash, burn_height)
+            if isinstance(burn_height, int):
+                if (
+                    self.last_burn_block_alert_height is None
+                    or burn_height > self.last_burn_block_alert_height
+                ):
+                    self.last_burn_block_alert_height = burn_height
+                    self._record_burn_block_event(event.ts, burn_height, alerts)
+                    self._emit_alert(
+                        alerts=alerts,
+                        key="burn-block-%d" % burn_height,
+                        severity="info",
+                        message=self._burn_block_alert_message(
+                            burn_height=burn_height,
+                            event=event,
+                        ),
+                        ts=event.ts,
+                    )
 
         elif event.kind == "node_winning_block_commit":
             apparent_sender = event.fields.get("apparent_sender")
@@ -1051,6 +1049,7 @@ class Detector:
                 "last_update_ts": ts,
                 "block_height": state.block_height,
                 "max_percent_observed": state.max_percent,
+                "max_reject_percent": state.max_reject_percent,
                 "threshold_seen": state.threshold_ts is not None,
                 "unique_signers_seen": len(state.signers),
                 "is_open": is_open,
@@ -1333,6 +1332,7 @@ class Detector:
                     "age_seconds": max(0.0, ts - state.start_ts),
                     "block_height": state.block_height,
                     "max_percent_observed": state.max_percent,
+                    "max_reject_percent": state.max_reject_percent,
                     "threshold_seen": state.threshold_ts is not None,
                     "unique_signers_seen": len(state.signers),
                 }
@@ -1358,6 +1358,7 @@ class Detector:
                     "age_seconds": max(0.0, ts - float(start_ts)),
                     "block_height": row.get("block_height"),
                     "max_percent_observed": row.get("max_percent_observed"),
+                    "max_reject_percent": row.get("max_reject_percent"),
                     "threshold_seen": bool(row.get("threshold_seen")),
                     "unique_signers_seen": row.get("unique_signers_seen"),
                     "last_update_ts": row.get("last_update_ts"),
