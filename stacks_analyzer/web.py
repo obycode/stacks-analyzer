@@ -256,7 +256,9 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
   <div class="wrap">
     <div class="header">
-      <h1>Stacks Analyzer</h1>
+      <div>
+        <h1>Stacks Analyzer</h1>
+      </div>
       <div class="header-right">
         <div class="height-chip" id="btcHeight">BTC: -</div>
         <div class="height-chip" id="stxHeight">STX: -</div>
@@ -689,6 +691,13 @@ REPORT_HTML = """<!doctype html>
       margin-bottom: 16px;
       box-shadow: 0 20px 40px rgba(15, 23, 42, 0.25);
     }
+    .card h2 {
+      font-size: 13px;
+      margin: 0 0 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
     .muted { color: var(--muted); }
     .sev {
       font-size: 11px;
@@ -703,12 +712,51 @@ REPORT_HTML = """<!doctype html>
     .sev-warning { background: rgba(245, 158, 11, 0.18); color: #fde68a; border-color: rgba(245, 158, 11, 0.4); }
     .sev-info { background: rgba(56, 189, 248, 0.18); color: #bae6fd; border-color: rgba(56, 189, 248, 0.4); }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    .grid {
+    .report-grid {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
     }
-    .grid .card { margin-bottom: 0; }
+    .report-columns {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+    }
+    .report-hero {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+    }
+    .report-hero .summary-title {
+      font-size: 18px;
+      line-height: 1.35;
+    }
+    .report-hero .summary-meta {
+      margin-top: 8px;
+    }
+    .report-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-end;
+      text-align: right;
+      min-width: 180px;
+    }
+    .report-section .card-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .scroll-panel {
+      max-height: 360px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+    .stack > .card:last-child { margin-bottom: 0; }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -743,6 +791,51 @@ REPORT_HTML = """<!doctype html>
     .btn:hover {
       background: rgba(56, 189, 248, 0.28);
     }
+    .summary-title {
+      font-size: 16px;
+      margin: 0 0 8px;
+    }
+    .summary-meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .kv-row {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: rgba(8, 16, 24, 0.45);
+    }
+    .kv-row span.value {
+      font-weight: 600;
+    }
+    .event-row {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+      background: rgba(8, 16, 24, 0.45);
+    }
+    .event-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .event-details summary {
+      cursor: pointer;
+      color: #bae6fd;
+      font-size: 12px;
+      margin-top: 6px;
+    }
     pre {
       margin: 0;
       white-space: pre-wrap;
@@ -751,7 +844,11 @@ REPORT_HTML = """<!doctype html>
       color: #e2e8f0;
     }
     @media (max-width: 900px) {
-      .grid { grid-template-columns: 1fr; }
+      .report-grid { grid-template-columns: 1fr; }
+      .report-columns { grid-template-columns: 1fr; }
+      .report-hero { flex-direction: column; }
+      .report-actions { align-items: flex-start; text-align: left; }
+      .kv { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -761,26 +858,50 @@ REPORT_HTML = """<!doctype html>
       <h1>Alert Report</h1>
       <a class="link" href="/">Back to dashboard</a>
     </div>
-    <div class="card" id="summaryCard">
-      <div class="muted">Loading report...</div>
-    </div>
-    <div class="grid">
-      <div class="card">
-        <h2 style="font-size:14px; margin:0 0 8px;">Snapshot</h2>
-        <pre id="snapshotBody"></pre>
+    <div class="report-grid">
+      <div class="card report-hero" id="summaryCard">
+        <div class="muted">Loading report...</div>
       </div>
-      <div class="card">
-        <h2 style="font-size:14px; margin:0 0 8px;">Recent Alerts</h2>
-        <div id="alertsBody"></div>
+      <div class="report-columns">
+        <div class="stack">
+          <div class="card report-section">
+            <div class="card-title">
+              <h2>Context</h2>
+            </div>
+            <div id="contextBody" class="kv"></div>
+          </div>
+          <div class="card report-section">
+            <div class="card-title">
+              <h2>Recent Events</h2>
+              <span class="muted">Most recent first</span>
+            </div>
+            <div id="eventsBody" class="scroll-panel"></div>
+          </div>
+          <div class="card report-section">
+            <div class="card-title">
+              <h2>Snapshot (Raw)</h2>
+            </div>
+            <details class="event-details">
+              <summary>Show snapshot JSON</summary>
+              <pre id="snapshotBody"></pre>
+            </details>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="card report-section">
+            <div class="card-title">
+              <h2>Recent Alerts</h2>
+            </div>
+            <div id="alertsBody" class="scroll-panel"></div>
+          </div>
+          <div class="card report-section">
+            <div class="card-title">
+              <h2>Recent Rejections</h2>
+            </div>
+            <div id="rejectionsBody" class="scroll-panel"></div>
+          </div>
+        </div>
       </div>
-      <div class="card">
-        <h2 style="font-size:14px; margin:0 0 8px;">Recent Rejections</h2>
-        <div id="rejectionsBody"></div>
-      </div>
-    </div>
-    <div class="card">
-      <h2 style="font-size:14px; margin:0 0 8px;">Recent Events</h2>
-      <div id="eventsBody"></div>
     </div>
   </div>
   <script>
@@ -810,18 +931,38 @@ REPORT_HTML = """<!doctype html>
       const alert = report.data && report.data.alert ? report.data.alert : {};
       const summary = report.summary || "-";
       document.getElementById("summaryCard").innerHTML =
-        "<div style='display:flex; justify-content:space-between; gap:12px; align-items:center;'>" +
-        "<div><div class='muted'>Alert</div><div style='margin-top:4px;'>" + escapeHtml(summary) + "</div>" +
-        "<div class='muted' style='margin-top:6px; font-size:12px;'>Key: " + escapeHtml(alert.key || report.alert_key || "-") + "</div>" +
+        "<div>" +
+        "<div class='muted'>Alert Report</div>" +
+        "<div class='summary-title'>" + escapeHtml(summary) + "</div>" +
+        "<div class='summary-meta'>Key: " + escapeHtml(alert.key || report.alert_key || "-") + "</div>" +
         "</div>" +
-        "<div style='text-align:right;'><div class='" + sevClass(alert.severity || report.severity) + "'>" + escapeHtml(alert.severity || report.severity) + "</div>" +
-        "<div class='muted' style='margin-top:6px; font-size:12px;'>Time: " + escapeHtml(fmtTime(report.ts)) + "</div>" +
-        "<div style='margin-top:10px;'><a class='btn' href='/api/report-logs?id=" + encodeURIComponent(report.id) + "'>Download Logs</a></div>" +
-        "</div>" +
+        "<div class='report-actions'>" +
+        "<div class='" + sevClass(alert.severity || report.severity) + "'>" + escapeHtml(alert.severity || report.severity) + "</div>" +
+        "<div class='summary-meta'>Time: " + escapeHtml(fmtTime(report.ts)) + "</div>" +
+        "<a class='btn' href='/api/report-logs?id=" + encodeURIComponent(report.id) + "'>Download Logs</a>" +
         "</div>";
 
       const snapshot = report.data && report.data.snapshot ? report.data.snapshot : null;
       document.getElementById("snapshotBody").textContent = snapshot ? JSON.stringify(snapshot, null, 2) : "n/a";
+      const contextItems = [];
+      if (snapshot) {
+        contextItems.push(["BTC Height", snapshot.current_bitcoin_block_height]);
+        contextItems.push(["STX Height", snapshot.current_stacks_block_height]);
+        contextItems.push(["Consensus Hash", snapshot.current_consensus_hash]);
+        contextItems.push(["Burn Height", snapshot.current_consensus_burn_height]);
+        contextItems.push(["Active Stalls", (snapshot.active_stalls || []).join(", ") || "none"]);
+        contextItems.push(["Open Proposals", snapshot.open_proposals_count]);
+        contextItems.push(["Last Tenure Extend", snapshot.last_tenure_extend_kind || "-"]);
+        contextItems.push(["Last Tenure Extend Age", snapshot.last_tenure_extend_age_seconds ? Math.round(snapshot.last_tenure_extend_age_seconds) + "s" : "-"]);
+      }
+      const contextBody = document.getElementById("contextBody");
+      contextBody.innerHTML = contextItems.length
+        ? contextItems.map((pair) => {
+            const label = escapeHtml(pair[0]);
+            const value = pair[1] === null || pair[1] === undefined || pair[1] === "" ? "-" : escapeHtml(pair[1]);
+            return "<div class='kv-row'><span class='muted'>" + label + "</span><span class='value'>" + value + "</span></div>";
+          }).join("")
+        : "<div class='muted'>No snapshot data.</div>";
 
       const alerts = (report.data && report.data.recent_alerts) || [];
       if (!alerts.length) {
@@ -849,12 +990,14 @@ REPORT_HTML = """<!doctype html>
       if (!events.length) {
         document.getElementById("eventsBody").innerHTML = "<div class='muted'>No events captured.</div>";
       } else {
-        document.getElementById("eventsBody").innerHTML = "<table><thead><tr><th>Time</th><th>Kind</th><th>Source</th><th>Details</th></tr></thead><tbody>" +
-          events.map((item) => {
-            const details = item.data ? JSON.stringify(item.data) : (item.line || "");
-            return "<tr><td>" + escapeHtml(fmtTime(item.ts)) + "</td><td class='mono'>" + escapeHtml(item.kind || "") + "</td><td>" + escapeHtml(item.source || "") + "</td><td><pre>" + escapeHtml(details) + "</pre></td></tr>";
-          }).join("") +
-          "</tbody></table>";
+        document.getElementById("eventsBody").innerHTML = events.map((item) => {
+          const details = item.data ? JSON.stringify(item.data) : (item.line || "");
+          return "<div class='event-row'>" +
+            "<div class='event-head'><span class='mono'>" + escapeHtml(item.kind || "") + "</span><span class='muted'>" + escapeHtml(fmtTime(item.ts)) + "</span></div>" +
+            "<div class='muted'>Source: " + escapeHtml(item.source || "") + "</div>" +
+            "<details class='event-details'><summary>Details</summary><pre>" + escapeHtml(details) + "</pre></details>" +
+            "</div>";
+        }).join("");
       }
     }
 
@@ -884,10 +1027,12 @@ REPORT_HTML = """<!doctype html>
 def build_handler(
     state_provider: Callable[[], Dict[str, Any]],
     history_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+    schema_provider: Optional[Callable[[], Dict[str, Any]]] = None,
     alerts_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
     reports_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
     report_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
     report_logs_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+    sql_provider: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> type:
     class DashboardHandler(BaseHTTPRequestHandler):
         def _send_bytes(
@@ -917,6 +1062,15 @@ def build_handler(
                     return
                 params = parse_qs(parsed.query)
                 payload = json.dumps(history_provider(params), sort_keys=True).encode("utf-8")
+                self._send_bytes(payload, "application/json; charset=utf-8")
+                return
+            if parsed.path == "/api/schema":
+                if schema_provider is None:
+                    self._send_bytes(
+                        b"history disabled\n", "text/plain; charset=utf-8", status=404
+                    )
+                    return
+                payload = json.dumps(schema_provider(), sort_keys=True).encode("utf-8")
                 self._send_bytes(payload, "application/json; charset=utf-8")
                 return
             if parsed.path == "/api/alerts":
@@ -987,6 +1141,25 @@ def build_handler(
                 return
             self._send_bytes(b"not found\n", "text/plain; charset=utf-8", status=404)
 
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path != "/api/sql":
+                self._send_bytes(b"not found\n", "text/plain; charset=utf-8", status=404)
+                return
+            if sql_provider is None:
+                self._send_bytes(b"sql api disabled\n", "text/plain; charset=utf-8", status=404)
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                self._send_bytes(b"bad request\n", "text/plain; charset=utf-8", status=400)
+                return
+            response = sql_provider(payload)
+            data = json.dumps(response, sort_keys=True).encode("utf-8")
+            self._send_bytes(data, "application/json; charset=utf-8")
+
         def log_message(self, format: str, *args: object) -> None:
             _ = (format, args)
 
@@ -1000,19 +1173,23 @@ class DashboardServer:
         port: int,
         state_provider: Callable[[], Dict[str, Any]],
         history_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+        schema_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         alerts_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
         reports_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
         report_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
         report_logs_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+        sql_provider: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     ) -> None:
         self.host = host
         self.port = port
         self.state_provider = state_provider
         self.history_provider = history_provider
+        self.schema_provider = schema_provider
         self.alerts_provider = alerts_provider
         self.reports_provider = reports_provider
         self.report_provider = report_provider
         self.report_logs_provider = report_logs_provider
+        self.sql_provider = sql_provider
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -1020,10 +1197,12 @@ class DashboardServer:
         handler = build_handler(
             self.state_provider,
             history_provider=self.history_provider,
+            schema_provider=self.schema_provider,
             alerts_provider=self.alerts_provider,
             reports_provider=self.reports_provider,
             report_provider=self.report_provider,
             report_logs_provider=self.report_logs_provider,
+            sql_provider=self.sql_provider,
         )
         self._server = ThreadingHTTPServer((self.host, self.port), handler)
         self._thread = threading.Thread(

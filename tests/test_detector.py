@@ -220,6 +220,101 @@ class TestDetector(unittest.TestCase):
                 },
             )
         )
+
+    def test_boundary_timeout_emits_warning(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                proposal_timeout_seconds=5,
+                burn_block_boundary_window_seconds=15,
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        signature_hash = "boundary123"
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_consensus",
+                ts=100.0,
+                fields={"burn_height": 935301, "consensus_hash": "abc123"},
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_proposal",
+                ts=105.0,
+                fields={
+                    "signer_signature_hash": signature_hash,
+                    "block_height": 6376073,
+                    "burn_height": 935301,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_rejection",
+                ts=106.0,
+                fields={
+                    "signer_signature_hash": signature_hash,
+                    "signer_pubkey": "pub1",
+                    "percent_rejected": 29.0,
+                    "reject_reason": "SortitionViewMismatch",
+                },
+            )
+        )
+        alerts, _ = detector.tick(now=112.0)
+        keys = {alert.key for alert in alerts}
+        self.assertIn("proposal-timeout-boundary-%s" % signature_hash, keys)
+        self.assertNotIn("proposal-timeout-%s" % signature_hash, keys)
+
+    def test_accept_then_reject_emits_warning(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        signature_hash = "flip123"
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_proposal",
+                ts=100.0,
+                fields={"signer_signature_hash": signature_hash, "block_height": 1},
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_acceptance",
+                ts=101.0,
+                fields={
+                    "signer_signature_hash": signature_hash,
+                    "signer_pubkey": "pub1",
+                    "signature_weight": 10,
+                },
+            )
+        )
+        alerts = detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_rejection",
+                ts=102.0,
+                fields={
+                    "signer_signature_hash": signature_hash,
+                    "signer_pubkey": "pub1",
+                    "percent_rejected": 1.0,
+                    "reject_reason": "SortitionViewMismatch",
+                },
+            )
+        )
+        keys = {alert.key for alert in alerts}
+        self.assertIn(
+            "signer-accept-then-reject-%s-%s" % (signature_hash, "pub1"[:10]),
+            keys,
+        )
         self.assertEqual(detector.signer_weight_samples["pub1"][-1], 42)
 
         detector.process_event(

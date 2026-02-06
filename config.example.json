@@ -39,6 +39,8 @@
     "path": "history.sqlite",
     "retention_hours": 48,
     "report_log_window_before_seconds": 600,
-    "report_log_window_after_seconds": 300
+    "report_log_window_after_seconds": 300,
+    "enable_sql_api": false,
+    "sql_api_max_rows": 500
   }
 }

@@ -33,4 +33,4 @@ dist/
 config.obynuc.json
 config.local-sample-web.json
 signer_names.json
-history.sqlite
+*.sqlite

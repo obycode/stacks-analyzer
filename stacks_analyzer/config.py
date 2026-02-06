@@ -28,6 +28,10 @@ class HistoryConfig:
     retention_hours: int = 48
     report_log_window_before_seconds: int = 600
     report_log_window_after_seconds: int = 300
+    enable_sql_api: bool = False
+    sql_api_max_rows: int = 500
+
+
 
 
 @dataclass
@@ -157,7 +161,10 @@ def build_service_config(raw: Optional[Dict[str, Any]]) -> ServiceConfig:
         report_log_window_after_seconds=int(
             history_payload.get("report_log_window_after_seconds", 300)
         ),
+        enable_sql_api=bool(history_payload.get("enable_sql_api", False)),
+        sql_api_max_rows=int(history_payload.get("sql_api_max_rows", 500)),
     )
+
 
     return ServiceConfig(
         mode=str(payload.get("mode", "files")),

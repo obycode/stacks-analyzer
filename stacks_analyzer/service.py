@@ -6,6 +6,7 @@ import threading
 import time
 import datetime
 import subprocess
+import re
 from typing import Any, Deque, Dict, Optional, Set
 
 from .config import ServiceConfig
@@ -71,10 +72,12 @@ class MonitoringService:
                 port=config.web.port,
                 state_provider=self._dashboard_state,
                 history_provider=self._history_api if self.history_store else None,
+                schema_provider=self._schema_api if self.history_store else None,
                 alerts_provider=self._alerts_api if self.history_store else None,
                 reports_provider=self._reports_api if self.history_store else None,
                 report_provider=self._report_api if self.history_store else None,
                 report_logs_provider=self._report_logs_api if self.history_store else None,
+                sql_provider=self._sql_api if self._sql_api_enabled() else None,
             )
 
         signal.signal(signal.SIGINT, self._handle_stop)
@@ -235,6 +238,8 @@ class MonitoringService:
                         data=event.fields,
                         line=event.line,
                     )
+                if event.kind in ("node_sortition_winner_selected", "node_sortition_winner_rejected"):
+                    self._record_sortition_event(event)
         self._publish_alerts(alert_batch)
 
     def _run_periodic(self, force_report: bool = False) -> None:
@@ -452,6 +457,95 @@ class MonitoringService:
             % (", ".join(units), start, end)
         )
         return header + result.stdout
+
+    def _sql_api(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if self.history_store is None or not self._sql_api_enabled():
+            return {"error": "sql api disabled"}
+        sql = payload.get("sql")
+        if not isinstance(sql, str) or not sql.strip():
+            return {"error": "missing sql"}
+        try:
+            safe_sql = self._sanitize_sql(sql, self.config.history.sql_api_max_rows)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        columns, rows = self.history_store.query_sql(
+            safe_sql, self.config.history.sql_api_max_rows
+        )
+        return {"sql": safe_sql, "columns": columns, "rows": rows}
+
+    def _schema_api(self) -> Dict[str, Any]:
+        if self.history_store is None:
+            return {"schema": {}}
+        return {"schema": self.history_store.schema()}
+
+    def _sql_api_enabled(self) -> bool:
+        return (
+            self.history_store is not None
+            and self.config.history.enable_sql_api
+        )
+
+    def _sanitize_sql(self, sql: str, max_rows: int) -> str:
+        cleaned = sql.strip().rstrip(";").strip()
+        lower = cleaned.lower()
+        if not lower.startswith("select"):
+            raise ValueError("Only SELECT statements are allowed.")
+        forbidden = re.compile(
+            r"\b(insert|update|delete|drop|alter|pragma|attach|detach|create|replace|truncate)\b",
+            re.IGNORECASE,
+        )
+        if forbidden.search(lower):
+            raise ValueError("Disallowed SQL statement.")
+        if ";" in cleaned:
+            cleaned = cleaned.split(";", 1)[0].strip()
+        limit_match = re.search(r"\blimit\s+(\d+)\b", lower)
+        if limit_match:
+            limit_value = int(limit_match.group(1))
+            if limit_value > max_rows:
+                cleaned = re.sub(
+                    r"\blimit\s+\d+\b",
+                    "LIMIT %d" % max_rows,
+                    cleaned,
+                    flags=re.IGNORECASE,
+                    count=1,
+                )
+        else:
+            cleaned = "%s LIMIT %d" % (cleaned, max_rows)
+        return cleaned
+
+    def _record_sortition_event(self, event: Any) -> None:
+        if self.history_store is None:
+            return
+        burn_height = event.fields.get("burn_height")
+        winner_txid = event.fields.get("winner_txid")
+        winning_stacks_block_hash = event.fields.get("winning_stacks_block_hash")
+        null_miner = False
+        if event.kind == "node_sortition_winner_rejected":
+            null_miner = True
+        else:
+            if isinstance(winner_txid, str) and self._is_zero_hash(winner_txid):
+                null_miner = True
+            if isinstance(winning_stacks_block_hash, str) and self._is_zero_hash(
+                winning_stacks_block_hash
+            ):
+                null_miner = True
+        self.history_store.record_sortition(
+            ts=event.ts,
+            burn_height=burn_height if isinstance(burn_height, int) else None,
+            winner_txid=winner_txid if isinstance(winner_txid, str) else None,
+            winning_stacks_block_hash=(
+                winning_stacks_block_hash
+                if isinstance(winning_stacks_block_hash, str)
+                else None
+            ),
+            null_miner_won=null_miner,
+            event_kind=event.kind,
+        )
+
+    @staticmethod
+    def _is_zero_hash(value: str) -> bool:
+        if len(value) != 64:
+            return False
+        return set(value) == {"0"}
 
 
     def _should_notify_telegram_for_alert(self, alert: Alert) -> bool:

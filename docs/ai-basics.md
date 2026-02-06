@@ -107,6 +107,16 @@ Block pushed missing:
   (miner stops due to new burn block). The "new block event" log is used to
   finalize in that case.
 
+Burn-boundary rejections:
+- `reject_reason: NotLatestSortitionWinner` or `SortitionViewMismatch` can indicate
+  a burn-block boundary race (signers saw different burn views). This can delay
+  threshold acceptance without ultimately rejecting the proposal.
+
+Signer response flip:
+- `reject -> accept` is allowed (signer saw different burn view later).
+- `accept -> reject` is treated as anomalous and should raise a warning, except
+  for extremely rare signer conditions.
+
 Null miner wins:
 - Sortition winner can be the null miner; the previous miner can extend tenure.
   This is reflected in node sortition logs and the active miner state machine.

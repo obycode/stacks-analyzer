@@ -4,7 +4,7 @@ Purpose: document known rejection patterns and the log signals that identify
 those patterns, so an AI or rule engine can classify rejections quickly when
 reviewing stored history.
 
-## Pattern: Burn-Block Boundary Split (NotLatestSortitionWinner)
+## Pattern: Burn-Block Boundary Split (NotLatestSortitionWinner / SortitionViewMismatch)
 
 Summary: a proposal arrives very close to a new bitcoin burn block. Some signers
 observe the new burn block first and reject the proposal as not the latest
@@ -12,7 +12,8 @@ sortition winner, while others accept based on the previous burn view. The
 proposal crosses the 30% rejection threshold and is finalized as rejected.
 
 Signals:
-- `Received block rejection` with `reject_reason: NotLatestSortitionWinner`.
+- `Received block rejection` with `reject_reason: NotLatestSortitionWinner` or
+  `reject_reason: SortitionViewMismatch`.
 - `percent_rejected` climbs to >= 30% (rejection threshold).
 - Proposal `burn_height` is N, and a new burn block event at height N+1 occurs
   within a small window (about 10-15s) of the proposal or rejection threshold.
@@ -31,6 +32,13 @@ Example (abbreviated):
 - Rejections: `reject_reason: NotLatestSortitionWinner`,
   `percent_rejected: 32.54`.
 - New burn block: `burn_block_height: 935235` shortly after.
+
+Example (delayed threshold, no rejection threshold):
+- Proposal: `signer_signature_hash: 91652cb2c621...` with `burn_height: 935301`.
+- Rejections: `reject_reason: SortitionViewMismatch`,
+  `percent_rejected: 29.49` (never hits 30%).
+- Threshold acceptance arrives ~50s later; block is pushed and finalized.
+  The delay is still boundary-related even though the proposal is accepted.
 
 Interpretation: the proposal likely raced a burn block boundary; signers split
 on which burn block they observed first.

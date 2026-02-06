@@ -7,6 +7,10 @@ from typing import Deque, Dict, List, Optional, Set, Tuple
 from .events import ParsedEvent
 
 ZERO_HASH = "0" * 64
+BOUNDARY_REJECTION_REASONS = (
+    "NotLatestSortitionWinner",
+    "SortitionViewMismatch",
+)
 
 
 @dataclass
@@ -49,6 +53,9 @@ class ProposalState:
     signers: Set[str] = field(default_factory=set)
     reject_signers: Set[str] = field(default_factory=set)
     reject_reasons: Set[str] = field(default_factory=set)
+    boundary_reason: Optional[str] = None
+    signer_responses: Dict[str, str] = field(default_factory=dict)
+    accept_then_reject_signers: Set[str] = field(default_factory=set)
     max_percent: float = 0.0
     max_reject_percent: float = 0.0
     total_weight: Optional[int] = None
@@ -473,6 +480,15 @@ class Detector:
                 if isinstance(signature_weight, int) and signature_weight > 0:
                     if signer_pubkey:
                         self.signer_weight_samples[signer_pubkey].append(signature_weight)
+                self._record_signer_response(
+                    state,
+                    signature_hash,
+                    signer_pubkey,
+                    "accept",
+                    event.ts,
+                    alerts,
+                    block_height=block_height if isinstance(block_height, int) else None,
+                )
                 self._record_proposal_activity(
                     signature_hash=signature_hash,
                     state=state,
@@ -504,6 +520,15 @@ class Detector:
                 if signer_pubkey:
                     self.seen_signers.add(signer_pubkey)
                     state.signers.add(signer_pubkey)
+                self._record_signer_response(
+                    state,
+                    signature_hash,
+                    signer_pubkey,
+                    "accept",
+                    event.ts,
+                    alerts,
+                    block_height=block_height if isinstance(block_height, int) else None,
+                )
                 self.proposal_reject_reasons.pop(signature_hash, None)
                 self._record_proposal_activity(
                     signature_hash=signature_hash,
@@ -519,6 +544,17 @@ class Detector:
                     return alerts
                 state = self.proposals.setdefault(signature_hash, ProposalState(event.ts))
                 self._apply_rejection_event(state, event)
+                self._record_signer_response(
+                    state,
+                    signature_hash,
+                    event.fields.get("signer_pubkey"),
+                    "reject",
+                    event.ts,
+                    alerts,
+                    block_height=event.fields.get("block_height")
+                    if isinstance(event.fields.get("block_height"), int)
+                    else None,
+                )
                 self._record_proposal_activity(
                     signature_hash=signature_hash,
                     state=state,
@@ -763,23 +799,63 @@ class Detector:
         for signature_hash, state in list(self.proposals.items()):
             age = ts - state.start_ts
             if state.threshold_ts is None and age > self.config.proposal_timeout_seconds:
-                if state.block_height is not None:
-                    message = (
-                        "Proposal %s (height %d) has no threshold confirmation after %.0fs"
-                        % (signature_hash[:12], state.block_height, age)
+                boundary_match = self._match_boundary_burn_for_state(state)
+                if boundary_match is not None:
+                    burn_ts, burn_height = boundary_match
+                    reason = (
+                        state.boundary_reason
+                        or self._summarize_reject_reason(state, None)
+                        or "unknown"
+                    )
+                    parts = []
+                    if state.block_height is not None:
+                        parts.append(
+                            "Proposal %s (height %d) delayed near burn-block boundary"
+                            % (signature_hash[:12], state.block_height)
+                        )
+                    else:
+                        parts.append(
+                            "Proposal %s delayed near burn-block boundary"
+                            % signature_hash[:12]
+                        )
+                    parts.append(
+                        "burn_height %s -> %s"
+                        % (
+                            state.burn_height if state.burn_height is not None else "n/a",
+                            burn_height,
+                        )
+                    )
+                    if reason:
+                        parts.append("reason=%s" % reason)
+                    if state.max_reject_percent > 0:
+                        parts.append("rejected~%.1f%%" % state.max_reject_percent)
+                    parts.append("age=%.0fs" % age)
+                    parts.append("Δt=%.1fs" % (burn_ts - state.start_ts))
+                    self._emit_alert(
+                        alerts=alerts,
+                        key="proposal-timeout-boundary-%s" % signature_hash,
+                        severity="warning",
+                        message=" | ".join(parts),
+                        ts=ts,
                     )
                 else:
-                    message = (
-                        "Proposal %s has no threshold confirmation after %.0fs"
-                        % (signature_hash[:12], age)
+                    if state.block_height is not None:
+                        message = (
+                            "Proposal %s (height %d) has no threshold confirmation after %.0fs"
+                            % (signature_hash[:12], state.block_height, age)
+                        )
+                    else:
+                        message = (
+                            "Proposal %s has no threshold confirmation after %.0fs"
+                            % (signature_hash[:12], age)
+                        )
+                    self._emit_alert(
+                        alerts=alerts,
+                        key="proposal-timeout-%s" % signature_hash,
+                        severity="critical",
+                        message=message,
+                        ts=ts,
                     )
-                self._emit_alert(
-                    alerts=alerts,
-                    key="proposal-timeout-%s" % signature_hash,
-                    severity="critical",
-                    message=message,
-                    ts=ts,
-                )
 
             # Keep memory bounded for older entries even if push lines are missing.
             if age > max(self.config.proposal_timeout_seconds * 4, 300):
@@ -818,6 +894,47 @@ class Detector:
                     ts=ts,
                 )
 
+    def _record_signer_response(
+        self,
+        state: ProposalState,
+        signature_hash: str,
+        signer_pubkey: Optional[object],
+        response: str,
+        ts: float,
+        alerts: List[Alert],
+        block_height: Optional[int] = None,
+    ) -> None:
+        if not isinstance(signer_pubkey, str) or not signer_pubkey:
+            return
+        prior = state.signer_responses.get(signer_pubkey)
+        if (
+            prior == "accept"
+            and response == "reject"
+            and signer_pubkey not in state.accept_then_reject_signers
+        ):
+            label = self._signer_label(signer_pubkey)
+            height = block_height if block_height is not None else state.block_height
+            if height is not None:
+                message = (
+                    "Signer %s accepted then rejected proposal %s (height %d)"
+                    % (label, signature_hash[:12], height)
+                )
+            else:
+                message = (
+                    "Signer %s accepted then rejected proposal %s"
+                    % (label, signature_hash[:12])
+                )
+            self._emit_alert(
+                alerts=alerts,
+                key="signer-accept-then-reject-%s-%s"
+                % (signature_hash, signer_pubkey[:10]),
+                severity="critical",
+                message=message,
+                ts=ts,
+            )
+            state.accept_then_reject_signers.add(signer_pubkey)
+        state.signer_responses[signer_pubkey] = response
+
     def _apply_rejection_event(self, state: ProposalState, event: ParsedEvent) -> None:
         signer_pubkey = event.fields.get("signer_pubkey")
         reject_reason = event.fields.get("reject_reason")
@@ -834,6 +951,9 @@ class Detector:
                 self.signer_weight_samples[signer_pubkey].append(signature_weight)
         if isinstance(reject_reason, str) and reject_reason:
             state.reject_reasons.add(reject_reason)
+            boundary_reason = self._boundary_reject_reason(reject_reason)
+            if boundary_reason:
+                state.boundary_reason = boundary_reason
         if isinstance(percent_rejected, (int, float)):
             state.max_reject_percent = max(state.max_reject_percent, float(percent_rejected))
         if isinstance(total_weight, int):
@@ -850,6 +970,8 @@ class Detector:
     def _summarize_reject_reason(
         self, state: ProposalState, reject_reason: Optional[object]
     ) -> Optional[str]:
+        if isinstance(state.boundary_reason, str) and state.boundary_reason:
+            return state.boundary_reason
         if isinstance(reject_reason, str) and reject_reason:
             return reject_reason
         if state.reject_reasons:
@@ -876,6 +998,7 @@ class Detector:
             }
             self.recent_rejections.append(entry)
 
+        reject_reason = reject_reason or state.boundary_reason
         entry.update(
             {
                 "ts": ts,
@@ -883,6 +1006,7 @@ class Detector:
                 "block_height": state.block_height,
                 "burn_height": state.burn_height,
                 "reject_reason": reject_reason,
+                "boundary_reason": state.boundary_reason,
                 "max_reject_percent": state.max_reject_percent,
                 "max_approved_percent": state.max_percent,
                 "accept_signers": len(state.signers),
@@ -930,7 +1054,7 @@ class Detector:
             return
         burn_ts, burn_height = match
 
-        reason = entry.get("reject_reason") or "unknown"
+        reason = entry.get("boundary_reason") or entry.get("reject_reason") or "unknown"
         proposal_burn_height = entry.get("burn_height")
         max_reject_percent = entry.get("max_reject_percent")
         max_approved_percent = entry.get("max_approved_percent")
@@ -970,8 +1094,8 @@ class Detector:
         entry: Dict[str, object],
         burn_event: Optional[Tuple[float, int]],
     ) -> Optional[Tuple[float, int]]:
-        reason = entry.get("reject_reason")
-        if not (isinstance(reason, str) and "NotLatestSortitionWinner" in reason):
+        reason = entry.get("boundary_reason") or entry.get("reject_reason")
+        if not self._boundary_reject_reason(reason):
             return None
         proposal_burn_height = entry.get("burn_height")
         if not isinstance(proposal_burn_height, int):
@@ -986,7 +1110,7 @@ class Detector:
             events.append(burn_event)
         events.extend(self.recent_burn_block_events)
         for burn_ts, burn_height in events:
-            if burn_height <= proposal_burn_height:
+            if burn_height < proposal_burn_height:
                 continue
             if isinstance(entry_ts, (int, float)) and abs(burn_ts - entry_ts) <= window:
                 return burn_ts, burn_height
@@ -995,6 +1119,32 @@ class Detector:
                 and abs(burn_ts - entry_start_ts) <= window
             ):
                 return burn_ts, burn_height
+        return None
+
+    def _match_boundary_burn_for_state(
+        self, state: ProposalState
+    ) -> Optional[Tuple[float, int]]:
+        if not isinstance(state.boundary_reason, str) or not state.boundary_reason:
+            return None
+        if not isinstance(state.burn_height, int):
+            return None
+        window = float(self.config.burn_block_boundary_window_seconds)
+        for burn_ts, burn_height in self.recent_burn_block_events:
+            if burn_height < state.burn_height:
+                continue
+            if isinstance(state.last_reject_ts, (int, float)) and abs(
+                burn_ts - state.last_reject_ts
+            ) <= window:
+                return burn_ts, burn_height
+            if abs(burn_ts - state.start_ts) <= window:
+                return burn_ts, burn_height
+        return None
+
+    def _boundary_reject_reason(self, reason: object) -> Optional[str]:
+        if isinstance(reason, str) and reason:
+            for candidate in BOUNDARY_REJECTION_REASONS:
+                if candidate in reason:
+                    return candidate
         return None
 
     def _finalize_proposal(
