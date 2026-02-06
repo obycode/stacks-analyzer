@@ -39,19 +39,55 @@ def journal_reader_worker(
     unit: str,
     out_queue: "queue.Queue[tuple]",
     stop_event: threading.Event,
+    prefetch_minutes: int = 30,
 ) -> None:
-    cmd = [
+    prefetch_cmd = [
+        "journalctl",
+        "-u",
+        unit,
+        "--since",
+        f"{prefetch_minutes} minutes ago",
+        "--output=short",
+        "--no-pager",
+    ]
+    follow_cmd = [
         "journalctl",
         "-f",
         "-u",
         unit,
         "-n",
         "0",
+        "--since",
+        "now",
         "--output=short",
         "--no-pager",
     ]
+    prefetch_proc = subprocess.Popen(
+        prefetch_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    try:
+        out_queue.put((source_name, "__meta__prefetch_start__"))
+        if prefetch_proc.stdout:
+            for line in prefetch_proc.stdout:
+                if stop_event.is_set():
+                    break
+                if line:
+                    out_queue.put((source_name, line))
+    finally:
+        if prefetch_proc.poll() is None:
+            prefetch_proc.terminate()
+            try:
+                prefetch_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                prefetch_proc.kill()
+        out_queue.put((source_name, "__meta__prefetch_end__"))
+
     process = subprocess.Popen(
-        cmd,
+        follow_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

@@ -32,6 +32,12 @@ SORTITION_WINNER_REJECTED_RE = re.compile(
 SIGNER_BURN_BLOCK_EVENT_RE = re.compile(
     r"Received a new burn block event for block height\s+(?P<burn_height>\d+)"
 )
+ADVANCED_TIP_RE = re.compile(
+    r"Advanced to new tip!\s+(?P<consensus_hash>[0-9a-fA-F]+)/(?P<block_header_hash>[0-9a-fA-F]+)"
+)
+NAKAMOTO_BLOCK_RE = re.compile(
+    r"Handle incoming Nakamoto block\s+(?P<consensus_hash>[0-9a-fA-F]+)/(?P<block_header_hash>[0-9a-fA-F]+)"
+)
 
 
 def extract_timestamp(line: str) -> float:
@@ -69,12 +75,90 @@ class LogParser:
         if source == "node":
             if "Advanced to new tip!" in line:
                 tip_value = line.split("Advanced to new tip!", 1)[-1].strip()
+                tip_match = ADVANCED_TIP_RE.search(line)
                 events.append(
                     ParsedEvent(
                         source=source,
                         kind="node_tip_advanced",
                         ts=ts,
-                        fields={"tip": tip_value},
+                        fields={
+                            "tip": tip_value,
+                            "consensus_hash": (
+                                tip_match.group("consensus_hash") if tip_match else None
+                            ),
+                            "block_header_hash": (
+                                tip_match.group("block_header_hash") if tip_match else None
+                            ),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "Handle incoming Nakamoto block" in line:
+                block_match = NAKAMOTO_BLOCK_RE.search(line)
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_nakamoto_block",
+                        ts=ts,
+                        fields={
+                            "consensus_hash": (
+                                block_match.group("consensus_hash")
+                                if block_match
+                                else None
+                            ),
+                            "block_header_hash": (
+                                block_match.group("block_header_hash")
+                                if block_match
+                                else None
+                            ),
+                            "block_id": extract_field(line, "block_id"),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "Received block proposal request" in line or "validated anchored block" in line:
+                block_header_hash = extract_field(line, "block_header_hash")
+                block_height = extract_field(line, "height")
+                burn_height = extract_field(line, "burn_block_height") or extract_field(
+                    line, "burn_height"
+                )
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_block_proposal",
+                        ts=ts,
+                        fields={
+                            "block_header_hash": block_header_hash,
+                            "block_height": int(block_height) if block_height else None,
+                            "burn_height": int(burn_height) if burn_height else None,
+                            "parent_block_id": extract_field(
+                                line, "parent_stacks_block_id"
+                            ),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "PoX reward set loaded from written block state" in line:
+                reward_block_id = extract_field(line, "reward_set_block_id")
+                burn_header_height = extract_field(line, "burn_header_height")
+                stacks_block_height = extract_field(line, "stacks_block_height")
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_reward_set_state",
+                        ts=ts,
+                        fields={
+                            "block_id": reward_block_id,
+                            "burn_height": (
+                                int(burn_header_height) if burn_header_height else None
+                            ),
+                            "block_height": (
+                                int(stacks_block_height) if stacks_block_height else None
+                            ),
+                        },
                         line=line,
                     )
                 )

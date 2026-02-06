@@ -448,10 +448,15 @@ DASHBOARD_HTML = """<!doctype html>
         const commitHtml = commits.length
           ? commits.map((item) => {
               const hasHeight = item.stacks_block_height !== null && item.stacks_block_height !== undefined;
+              const burnHeight = item.stacks_block_burn_height;
               const blockHash = item.stacks_block_hash || "-";
-              const blockTarget = hasHeight
-                ? String(blockHash) + " (h=" + item.stacks_block_height + ")"
-                : blockHash;
+              let blockTarget = String(blockHash);
+              if (hasHeight) {
+                blockTarget += " (h=" + item.stacks_block_height + ")";
+              }
+              if (burnHeight !== null && burnHeight !== undefined) {
+                blockTarget += " (burn=" + burnHeight + ")";
+              }
               const targetLabel = escapeHtml(shortHash(blockTarget, 36));
               const commitClass = item.is_winner ? "commit commit-winner" : "commit";
               const address = item.apparent_sender || "";
@@ -461,7 +466,10 @@ DASHBOARD_HTML = """<!doctype html>
               const targetLink = item.stacks_block_hash
                 ? hiroBlockHashLink(item.stacks_block_hash, targetLabel)
                 : targetLabel;
-              return "<div class='" + commitClass + "'><div class='mono'>" + addressHtml + "</div><div class='mono'>commit " + commitLink + "</div><div class='mono'>target " + targetLink + "</div></div>";
+              const burnLink = burnHeight !== null && burnHeight !== undefined
+                ? " burn=" + hiroBtcBlockLink(burnHeight, escapeHtml(burnHeight))
+                : "";
+              return "<div class='" + commitClass + "'><div class='mono'>" + addressHtml + "</div><div class='mono'>commit " + commitLink + "</div><div class='mono'>target " + targetLink + burnLink + "</div></div>";
             }).join("")
           : "<div class='commit'>No commits captured for this burn height.</div>";
         const burnLabel = "Burn #" + escapeHtml(round.burn_height);

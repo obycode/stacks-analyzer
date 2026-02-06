@@ -38,11 +38,15 @@ class MonitoringService:
         self.replay_event_base_ts: Optional[float] = None
         self.latest_event_ts_by_source: Dict[str, float] = {}
         self.replay_sources: Set[str] = set()
+        self.suppress_notifications: bool = False
+        self.prefetch_sources: Set[str] = set()
         if config.mode == "files":
             if config.node_log_path:
                 self.replay_sources.add("node")
             if config.signer_log_path:
                 self.replay_sources.add("signer")
+        elif config.mode == "journalctl":
+            self.prefetch_sources = {"node", "signer"}
         self.state_lock = threading.Lock()
         self.recent_alerts: Deque[Dict[str, Any]] = deque(maxlen=200)
         self.recent_reports: Deque[Dict[str, Any]] = deque(maxlen=200)
@@ -172,6 +176,20 @@ class MonitoringService:
         self._process_line(source, line)
 
     def _process_line(self, source: str, line: str) -> None:
+        if line == "__meta__prefetch_start__":
+            self.suppress_notifications = True
+            with self.state_lock:
+                self.detector.suppress_alerts = True
+            return
+        if line == "__meta__prefetch_end__":
+            if source in self.prefetch_sources:
+                self.prefetch_sources.discard(source)
+            if not self.prefetch_sources:
+                self.suppress_notifications = False
+                with self.state_lock:
+                    self.detector.suppress_alerts = False
+            return
+
         with self.state_lock:
             self.detector.process_line(source)
             events = self.parser.parse_line(source, line)
@@ -208,7 +226,11 @@ class MonitoringService:
                 self.recent_reports.append({"ts": now, "report": report})
             print(report, flush=True)
             self._write_report(report)
-            if self.notifier and self.config.telegram.send_reports:
+            if (
+                self.notifier
+                and not self.suppress_notifications
+                and self.config.telegram.send_reports
+            ):
                 self.notifier.send(report)
 
     def _write_report(self, report: str) -> None:
@@ -234,7 +256,11 @@ class MonitoringService:
             )
         rendered = "[ALERT][%s] %s" % (alert.severity.upper(), alert.message)
         print(rendered, flush=True)
-        if self.notifier and self._should_notify_telegram_for_alert(alert):
+        if (
+            self.notifier
+            and not self.suppress_notifications
+            and self._should_notify_telegram_for_alert(alert)
+        ):
             self.notifier.send(rendered)
 
     def _should_notify_telegram_for_alert(self, alert: Alert) -> bool:

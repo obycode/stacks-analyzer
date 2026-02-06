@@ -132,6 +132,10 @@ class Detector:
         self.sortition_round_order: Deque[int] = deque()
         self.block_height_by_hash: Dict[str, int] = {}
         self.block_height_hash_order: Deque[str] = deque()
+        self.block_header_to_consensus: Dict[str, str] = {}
+        self.block_header_consensus_order: Deque[str] = deque()
+        self.burn_height_by_block_hash: Dict[str, int] = {}
+        self.block_burn_height_order: Deque[str] = deque()
         self.burn_height_by_consensus_hash: Dict[str, int] = {}
         self.recent_burn_block_events: Deque[Tuple[float, int]] = deque(maxlen=32)
         self.recent_rejections: Deque[Dict[str, object]] = deque(maxlen=200)
@@ -152,6 +156,7 @@ class Detector:
         self.completed_with_threshold: int = 0
         self.closed_proposals: Dict[str, float] = {}
         self.proposal_reject_reasons: Dict[str, str] = {}
+        self.suppress_alerts: bool = False
 
     def process_line(self, source: str) -> None:
         self.processed_lines[source] += 1
@@ -1142,12 +1147,16 @@ class Detector:
             if commit.stacks_block_hash
             else None
         )
+        stacks_block_burn_height = self._burn_height_for_block_hash(
+            commit.stacks_block_hash
+        )
         return {
             "burn_height": commit.burn_height,
             "commit_txid": commit.commit_txid,
             "apparent_sender": commit.apparent_sender,
             "stacks_block_hash": commit.stacks_block_hash,
             "stacks_block_height": stacks_block_height,
+            "stacks_block_burn_height": stacks_block_burn_height,
             "sortition_position": commit.sortition_position,
             "parent_burn_block": commit.parent_burn_block,
             "is_winner": bool(winner_txid and commit.commit_txid == winner_txid),
@@ -1177,6 +1186,48 @@ class Detector:
             if oldest_hash in self.block_height_by_hash and oldest_hash != block_hash:
                 self.block_height_by_hash.pop(oldest_hash, None)
 
+    def _remember_block_header_consensus(
+        self, block_hash: str, consensus_hash: str
+    ) -> None:
+        existing = self.block_header_to_consensus.get(block_hash)
+        if existing == consensus_hash:
+            return
+        self.block_header_to_consensus[block_hash] = consensus_hash
+        self.block_header_consensus_order.append(block_hash)
+        while len(self.block_header_consensus_order) > self.config.hash_height_map_size:
+            oldest_hash = self.block_header_consensus_order.popleft()
+            if (
+                oldest_hash in self.block_header_to_consensus
+                and oldest_hash != block_hash
+            ):
+                self.block_header_to_consensus.pop(oldest_hash, None)
+
+    def _remember_block_hash_burn(self, block_hash: str, burn_height: int) -> None:
+        existing_height = self.burn_height_by_block_hash.get(block_hash)
+        if existing_height is not None and existing_height >= burn_height:
+            return
+
+        self.burn_height_by_block_hash[block_hash] = burn_height
+        self.block_burn_height_order.append(block_hash)
+        while len(self.block_burn_height_order) > self.config.hash_height_map_size:
+            oldest_hash = self.block_burn_height_order.popleft()
+            if oldest_hash in self.burn_height_by_block_hash and oldest_hash != block_hash:
+                self.burn_height_by_block_hash.pop(oldest_hash, None)
+
+    def _burn_height_for_block_hash(self, block_hash: Optional[str]) -> Optional[int]:
+        if not isinstance(block_hash, str) or not block_hash:
+            return None
+        burn_height = self.burn_height_by_block_hash.get(block_hash)
+        if isinstance(burn_height, int):
+            return burn_height
+        consensus_hash = self.block_header_to_consensus.get(block_hash)
+        if isinstance(consensus_hash, str):
+            burn_height = self.burn_height_by_consensus_hash.get(consensus_hash)
+            if isinstance(burn_height, int):
+                self._remember_block_hash_burn(block_hash, burn_height)
+                return burn_height
+        return None
+
     def _index_hash_height_from_event(self, event: ParsedEvent) -> None:
         block_height = event.fields.get("block_height")
         parent_last_height = event.fields.get("parent_tenure_last_block_height")
@@ -1193,6 +1244,22 @@ class Detector:
             and isinstance(parent_last_height, int)
         ):
             self._remember_block_hash_height(parent_last_block, parent_last_height)
+
+        block_header_hash = event.fields.get("block_header_hash")
+        consensus_hash = event.fields.get("consensus_hash")
+        burn_height = event.fields.get("burn_height")
+
+        if isinstance(block_header_hash, str) and block_header_hash:
+            if isinstance(consensus_hash, str) and consensus_hash:
+                self._remember_block_header_consensus(block_header_hash, consensus_hash)
+            if isinstance(burn_height, int):
+                self._remember_block_hash_burn(block_header_hash, burn_height)
+            if isinstance(block_height, int):
+                self._remember_block_hash_height(block_header_hash, block_height)
+
+        block_id = event.fields.get("block_id")
+        if isinstance(block_id, str) and block_id and isinstance(burn_height, int):
+            self._remember_block_hash_burn(block_id, burn_height)
 
     def snapshot(self, now: Optional[float] = None) -> Dict[str, object]:
         ts = now if now is not None else time.time()
@@ -1561,6 +1628,8 @@ class Detector:
     def _emit_alert(
         self, alerts: List[Alert], key: str, severity: str, message: str, ts: float
     ) -> None:
+        if self.suppress_alerts:
+            return
         previous_ts = self.last_alert_ts.get(key)
         if previous_ts is not None and (ts - previous_ts) < self.config.alert_cooldown_seconds:
             return
@@ -1574,9 +1643,17 @@ class Detector:
         if isinstance(burn_height, int):
             self.current_consensus_burn_height = burn_height
             self.burn_height_by_consensus_hash[consensus_hash] = burn_height
+            self._propagate_burn_height_for_consensus(consensus_hash, burn_height)
             return
         known_burn_height = self.burn_height_by_consensus_hash.get(consensus_hash)
         self.current_consensus_burn_height = known_burn_height
+
+    def _propagate_burn_height_for_consensus(
+        self, consensus_hash: str, burn_height: int
+    ) -> None:
+        for block_hash, mapped_consensus in list(self.block_header_to_consensus.items()):
+            if mapped_consensus == consensus_hash:
+                self._remember_block_hash_burn(block_hash, burn_height)
 
     def _update_chain_heights(self, fields: Dict[str, object]) -> None:
         block_height = fields.get("block_height")
