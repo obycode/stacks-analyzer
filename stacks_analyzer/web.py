@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 from urllib.parse import parse_qs
 
 
-DASHBOARD_HTML = """<!doctype html>
+DASHBOARD_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -67,9 +67,12 @@ DASHBOARD_HTML = """<!doctype html>
     .muted { color: var(--muted); font-size: 13px; }
     .grid {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 12px;
       margin-bottom: 14px;
+    }
+    .grid .value {
+      font-size: 22px;
     }
     .card {
       background: var(--card);
@@ -219,11 +222,14 @@ DASHBOARD_HTML = """<!doctype html>
       text-transform: uppercase;
       letter-spacing: 0.08em;
       border: 1px solid var(--line);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
     }
     .badge-winner {
-      color: #bbf7d0;
-      background: rgba(34, 197, 94, 0.16);
-      border-color: rgba(34, 197, 94, 0.35);
+      color: var(--miner-color, #bbf7d0);
+      background: rgba(15, 23, 42, 0.5);
+      border-color: var(--miner-color, rgba(34, 197, 94, 0.35));
     }
     .badge-null {
       color: #fde68a;
@@ -244,6 +250,29 @@ DASHBOARD_HTML = """<!doctype html>
     .commit-winner {
       border-color: rgba(34, 197, 94, 0.45);
       background: rgba(34, 197, 94, 0.08);
+    }
+    .miner-line {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .miner-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      display: inline-block;
+      background: var(--miner-color, #94a3b8);
+      box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.6);
+    }
+    .miner-tag {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 1px 6px;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--miner-color, #cbd5e1);
+      background: rgba(15, 23, 42, 0.5);
     }
 
     @media (max-width: 980px) {
@@ -271,6 +300,7 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="card"><div class="label">Node Tip Age</div><div class="value" id="tipAge">-</div></div>
       <div class="card"><div class="label">Signer Proposal Age</div><div class="value" id="proposalAge">-</div></div>
       <div class="card"><div class="label">Avg Block Interval</div><div class="value" id="avgBlockInterval">-</div></div>
+      <div class="card"><div class="label">Mempool Ready Txs</div><div class="value" id="mempoolReady">-</div></div>
     </div>
 
     <div class="card">
@@ -407,6 +437,33 @@ DASHBOARD_HTML = """<!doctype html>
       return value.startsWith("bc1") || value.startsWith("1") || value.startsWith("3");
     }
 
+    function hashString(value) {
+      let hash = 0;
+      for (let i = 0; i < value.length; i += 1) {
+        hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+      }
+      return hash;
+    }
+
+    function minerKey(item) {
+      return item.apparent_sender || item.commit_txid || "";
+    }
+
+    function minerColor(key) {
+      if (!key) return "#94a3b8";
+      const hash = hashString(key);
+      const hue = (hash * 137.508) % 360;
+      const sat = 65 + (hash % 20);
+      const light = 45 + (hash % 10);
+      return "hsl(" + hue.toFixed(0) + ", " + sat.toFixed(0) + "%, " + light.toFixed(0) + "%)";
+    }
+
+    function minerName(key) {
+      if (!key) return "Miner ?";
+      const letter = String.fromCharCode(65 + (hashString(key) % 26));
+      return "Miner " + letter;
+    }
+
     function linkifyAlertMessage(alert) {
       const message = String(alert.message || "");
       let rendered = escapeHtml(message);
@@ -458,9 +515,25 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       container.innerHTML = rounds.map((round) => {
-        const outcome = round.null_miner_won ? "null-miner" : (round.winner_txid ? "winner-selected" : "pending");
-        const badgeClass = round.null_miner_won ? "badge badge-null" : "badge badge-winner";
         const commits = round.commits || [];
+        const winnerCommit = round.winner_txid
+          ? commits.find((item) => item.commit_txid === round.winner_txid)
+          : null;
+        const winnerKey = winnerCommit ? minerKey(winnerCommit) : "";
+        const winnerTag = winnerKey ? minerName(winnerKey) : "winner-selected";
+        const winnerColor = winnerKey ? minerColor(winnerKey) : null;
+        const outcome = round.null_miner_won ? "null-miner" : (round.winner_txid ? winnerTag : "pending");
+        const badgeClass = round.null_miner_won ? "badge badge-null" : "badge badge-winner";
+        const sortedCommits = commits.slice().sort((a, b) => {
+          const keyA = minerKey(a);
+          const keyB = minerKey(b);
+          if (keyA === keyB) {
+            const winA = a.is_winner ? 1 : 0;
+            const winB = b.is_winner ? 1 : 0;
+            return winB - winA;
+          }
+          return keyA.localeCompare(keyB);
+        });
         const candidateTs = [];
         if (round.winner_ts) candidateTs.push(round.winner_ts);
         if (round.rejected_ts) candidateTs.push(round.rejected_ts);
@@ -469,10 +542,13 @@ DASHBOARD_HTML = """<!doctype html>
         }
         const latestTs = candidateTs.length ? Math.max(...candidateTs) : null;
         const ageText = latestTs ? fmtAge(Math.max(0, nowEpoch - latestTs)) : "";
-        const commitHtml = commits.length
-          ? commits.map((item) => {
+        const commitHtml = sortedCommits.length
+          ? sortedCommits.map((item) => {
               const commitClass = item.is_winner ? "commit commit-winner" : "commit";
               const address = item.apparent_sender || "";
+              const key = minerKey(item);
+              const color = minerColor(key);
+              const tag = minerName(key);
               const commitLabel = escapeHtml(shortHash(item.commit_txid, 20));
               const addressHtml = address ? mempoolAddressLink(address) : "-";
               const commitLink = item.commit_txid ? mempoolTxLink(item.commit_txid, commitLabel) : "-";
@@ -480,12 +556,20 @@ DASHBOARD_HTML = """<!doctype html>
               const parentBurnLabel = parentBurn !== null && parentBurn !== undefined
                 ? hiroBtcBlockLink(parentBurn, escapeHtml(parentBurn))
                 : "-";
-              return "<div class='" + commitClass + "'><div class='mono'>" + addressHtml + "</div><div class='mono'>commit " + commitLink + "</div><div class='mono'>parent burn block " + parentBurnLabel + "</div></div>";
+              const minerBadge = "<span class='miner-line'><span class='miner-dot' style='--miner-color: " + color + "'></span><span class='miner-tag' style='--miner-color: " + color + "'>" + escapeHtml(tag) + "</span></span>";
+              return "<div class='" + commitClass + "' style='border-left: 3px solid " + color + ";'><div class='mono'>" + minerBadge + " " + addressHtml + "</div><div class='mono'>commit " + commitLink + "</div><div class='mono'>parent burn block " + parentBurnLabel + "</div></div>";
             }).join("")
           : "<div class='commit'>No commits captured for this burn height.</div>";
         const burnLabel = "Burn #" + escapeHtml(round.burn_height);
         const ageLabel = ageText ? " <span class='round-age'>" + escapeHtml(ageText) + " ago</span>" : "";
-        return "<div class='round'><div class='round-head'><span>" + burnLabel + ageLabel + "</span><span class='" + badgeClass + "'>" + escapeHtml(outcome) + "</span></div><div class='commit-list'>" + commitHtml + "</div></div>";
+        let badgeHtml = "<span class='" + badgeClass + "'>" + escapeHtml(outcome) + "</span>";
+        if (!round.null_miner_won && round.winner_txid && winnerColor) {
+          badgeHtml = "<span class='" + badgeClass + "' style='--miner-color: " + winnerColor + ";'>" +
+            "<span class='miner-dot' style='--miner-color: " + winnerColor + ";'></span>" +
+            escapeHtml(outcome) +
+            "</span>";
+        }
+        return "<div class='round'><div class='round-head'><span>" + burnLabel + ageLabel + "</span>" + badgeHtml + "</div><div class='commit-list'>" + commitHtml + "</div></div>";
       }).join("");
     }
 
@@ -514,6 +598,9 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById("tipAge").textContent = fmtAge(data.node_tip_age_seconds);
       document.getElementById("proposalAge").textContent = fmtAge(data.signer_proposal_age_seconds);
       document.getElementById("avgBlockInterval").textContent = fmtAge(data.avg_block_interval_seconds);
+      const mempoolReady = data.mempool_ready_txs;
+      document.getElementById("mempoolReady").textContent =
+        mempoolReady === null || mempoolReady === undefined ? "-" : mempoolReady;
       const btc = data.current_bitcoin_block_height;
       const stx = data.current_stacks_block_height;
       document.getElementById("btcHeight").textContent = "BTC: " + (btc === null || btc === undefined ? "-" : btc);
@@ -637,7 +724,7 @@ DASHBOARD_HTML = """<!doctype html>
 """
 
 
-REPORT_HTML = """<!doctype html>
+REPORT_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -1059,6 +1146,7 @@ REPORT_HTML = """<!doctype html>
         contextItems.push(["Burn Height", snapshot.current_consensus_burn_height]);
         contextItems.push(["Active Stalls", (snapshot.active_stalls || []).join(", ") || "none"]);
         contextItems.push(["Open Proposals", snapshot.open_proposals_count]);
+        contextItems.push(["Mempool Ready Txs", snapshot.mempool_ready_txs]);
         contextItems.push(["Last Tenure Extend", snapshot.last_tenure_extend_kind || "-"]);
         contextItems.push(["Last Tenure Extend Age", snapshot.last_tenure_extend_age_seconds ? Math.round(snapshot.last_tenure_extend_age_seconds) + "s" : "-"]);
       }

@@ -38,6 +38,9 @@ ADVANCED_TIP_RE = re.compile(
 NAKAMOTO_BLOCK_RE = re.compile(
     r"Handle incoming Nakamoto block\s+(?P<consensus_hash>[0-9a-fA-F]+)/(?P<block_header_hash>[0-9a-fA-F]+)"
 )
+MEMPOOL_ITERATION_RE = re.compile(
+    r"Mempool iteration finished"
+)
 
 
 def extract_timestamp(line: str) -> float:
@@ -73,6 +76,26 @@ class LogParser:
         events: List[ParsedEvent] = []
 
         if source == "node":
+            if "Mempool iteration finished" in line:
+                considered_txs = extract_field(line, "considered_txs")
+                elapsed_ms = extract_field(line, "elapsed_ms")
+                stop_reason = extract_field(line, "stop_reason")
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_mempool_iteration",
+                        ts=ts,
+                        fields={
+                            "considered_txs": int(considered_txs)
+                            if considered_txs is not None
+                            else None,
+                            "elapsed_ms": int(elapsed_ms) if elapsed_ms is not None else None,
+                            "stop_reason": stop_reason,
+                        },
+                        line=line,
+                    )
+                )
+
             if "Advanced to new tip!" in line:
                 tip_value = line.split("Advanced to new tip!", 1)[-1].strip()
                 tip_match = ADVANCED_TIP_RE.search(line)

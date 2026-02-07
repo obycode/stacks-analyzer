@@ -101,6 +101,11 @@ class Detector:
         self.block_interval_samples: int = 0
         self.last_signer_proposal_ts: Optional[float] = None
         self.last_report_ts: float = 0.0
+        self.last_mempool_ready_txs: Optional[int] = None
+        self.last_mempool_ready_ts: Optional[float] = None
+        self.last_mempool_stop_reason: Optional[str] = None
+        self.last_mempool_elapsed_ms: Optional[int] = None
+        self.last_mempool_ts: Optional[float] = None
         self.current_stacks_block_height: Optional[int] = None
         self.current_bitcoin_block_height: Optional[int] = None
         self.current_consensus_hash: Optional[str] = None
@@ -185,6 +190,35 @@ class Detector:
                     self.block_interval_samples += 1
             self.last_node_tip_ts = event.ts
             self._clear_stall("node-stall", event.ts, alerts)
+
+        elif event.kind == "node_mempool_iteration":
+            considered_txs = event.fields.get("considered_txs")
+            elapsed_ms = event.fields.get("elapsed_ms")
+            stop_reason = event.fields.get("stop_reason")
+            self.last_mempool_ts = event.ts
+            self.last_mempool_stop_reason = (
+                stop_reason if isinstance(stop_reason, str) else None
+            )
+            if isinstance(elapsed_ms, int):
+                self.last_mempool_elapsed_ms = elapsed_ms
+            if isinstance(stop_reason, str) and stop_reason == "NoMoreCandidates":
+                if isinstance(considered_txs, int):
+                    self.last_mempool_ready_txs = considered_txs
+                    self.last_mempool_ready_ts = event.ts
+            if isinstance(stop_reason, str) and stop_reason == "DeadlineReached":
+                details = []
+                if isinstance(considered_txs, int):
+                    details.append("considered_txs=%d" % considered_txs)
+                if isinstance(elapsed_ms, int):
+                    details.append("elapsed_ms=%d" % elapsed_ms)
+                suffix = " | ".join(details) if details else "deadline reached"
+                self._emit_alert(
+                    alerts=alerts,
+                    key="mempool-iteration-deadline",
+                    severity="warning",
+                    message="Mempool iteration reached deadline (%s)" % suffix,
+                    ts=event.ts,
+                )
 
         elif event.kind == "node_stale_chunk":
             self.stale_chunks.append(event.ts)
@@ -776,12 +810,23 @@ class Detector:
         if self.last_node_tip_ts is not None:
             node_gap = ts - self.last_node_tip_ts
             if node_gap > self.config.node_stall_seconds:
+                severity = "critical"
+                message = "No new node tip for %.0fs (threshold=%ds)" % (
+                    node_gap,
+                    self.config.node_stall_seconds,
+                )
+                if self._mempool_empty_recent(ts):
+                    severity = "info"
+                    message = (
+                        "No new node tip for %.0fs (threshold=%ds) | mempool_ready_txs=0"
+                        % (node_gap, self.config.node_stall_seconds)
+                    )
                 self._emit_stall(
                     alerts=alerts,
                     key="node-stall",
-                    message="No new node tip for %.0fs (threshold=%ds)"
-                    % (node_gap, self.config.node_stall_seconds),
+                    message=message,
                     ts=ts,
+                    severity=severity,
                 )
 
         if self.last_signer_proposal_ts is not None:
@@ -793,6 +838,7 @@ class Detector:
                     message="No signer block proposal for %.0fs (threshold=%ds)"
                     % (signer_gap, self.config.signer_stall_seconds),
                     ts=ts,
+                    severity="critical",
                 )
 
     def _detect_proposal_timeouts(self, ts: float, alerts: List[Alert]) -> None:
@@ -1727,6 +1773,15 @@ class Detector:
             "avg_block_interval_seconds": avg_block_interval_seconds,
             "avg_block_interval_samples": self.block_interval_samples,
             "last_block_interval_seconds": self.last_block_interval_seconds,
+            "mempool_ready_txs": self.last_mempool_ready_txs,
+            "mempool_ready_ts": self.last_mempool_ready_ts,
+            "mempool_stop_reason": self.last_mempool_stop_reason,
+            "mempool_elapsed_ms": self.last_mempool_elapsed_ms,
+            "mempool_age_seconds": (
+                None
+                if self.last_mempool_ts is None
+                else max(0.0, ts - self.last_mempool_ts)
+            ),
             "signer_proposal_age_seconds": (
                 None
                 if self.last_signer_proposal_ts is None
@@ -1810,10 +1865,20 @@ class Detector:
         return rows
 
     def _emit_stall(
-        self, alerts: List[Alert], key: str, message: str, ts: float
+        self, alerts: List[Alert], key: str, message: str, ts: float, severity: str
     ) -> None:
         self.active_stalls.add(key)
-        self._emit_alert(alerts, key=key, severity="critical", message=message, ts=ts)
+        self._emit_alert(alerts, key=key, severity=severity, message=message, ts=ts)
+
+    def _mempool_empty_recent(self, ts: float) -> bool:
+        if self.last_mempool_stop_reason != "NoMoreCandidates":
+            return False
+        if self.last_mempool_ready_txs != 0:
+            return False
+        if self.last_mempool_ready_ts is None:
+            return False
+        window = min(self.config.node_stall_seconds, 120)
+        return (ts - self.last_mempool_ready_ts) <= window
 
     def _clear_stall(self, key: str, ts: float, alerts: List[Alert]) -> None:
         if key in self.active_stalls:

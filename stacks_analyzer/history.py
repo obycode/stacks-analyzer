@@ -374,6 +374,7 @@ class HistoryStore:
 
 def should_store_event(kind: str, fields: Dict[str, Any]) -> bool:
     if kind in {
+        "node_mempool_iteration",
         "node_leader_block_commit",
         "node_sortition_winner_selected",
         "node_sortition_winner_rejected",
