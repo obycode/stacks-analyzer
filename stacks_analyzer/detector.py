@@ -11,6 +11,13 @@ BOUNDARY_REJECTION_REASONS = (
     "NotLatestSortitionWinner",
     "SortitionViewMismatch",
 )
+EXECUTION_COST_LIMITS = {
+    "runtime": 5_000_000_000,
+    "write_len": 15_000_000,
+    "write_cnt": 15_000,
+    "read_len": 100_000_000,
+    "read_cnt": 15_000,
+}
 
 
 @dataclass
@@ -106,6 +113,12 @@ class Detector:
         self.last_mempool_stop_reason: Optional[str] = None
         self.last_mempool_elapsed_ms: Optional[int] = None
         self.last_mempool_ts: Optional[float] = None
+        self.last_execution_costs: Optional[Dict[str, int]] = None
+        self.last_execution_costs_percent: Optional[Dict[str, float]] = None
+        self.last_execution_cost_ts: Optional[float] = None
+        self.last_execution_cost_block_height: Optional[int] = None
+        self.last_execution_cost_tx_count: Optional[int] = None
+        self.last_execution_cost_percent_full: Optional[int] = None
         self.current_stacks_block_height: Optional[int] = None
         self.current_bitcoin_block_height: Optional[int] = None
         self.current_consensus_hash: Optional[str] = None
@@ -132,6 +145,7 @@ class Detector:
         self.tenure_extend_history: Deque[Dict[str, object]] = deque(
             maxlen=self.config.tenure_extend_history_size
         )
+        self.execution_cost_history: Deque[Dict[str, object]] = deque(maxlen=120)
         self.signer_names: Dict[str, str] = signer_names or {}
 
         self.processed_lines: Dict[str, int] = defaultdict(int)
@@ -218,6 +232,44 @@ class Detector:
                     severity="warning",
                     message="Mempool iteration reached deadline (%s)" % suffix,
                     ts=event.ts,
+                )
+
+        elif event.kind == "node_mined_nakamoto_block":
+            costs: Dict[str, int] = {}
+            cost_percents: Dict[str, float] = {}
+            for key, limit in EXECUTION_COST_LIMITS.items():
+                value = event.fields.get(key)
+                if not isinstance(value, int):
+                    continue
+                costs[key] = value
+                cost_percents[key] = max(
+                    0.0, min(100.0, (float(value) / float(limit)) * 100.0)
+                )
+            if costs:
+                self.last_execution_costs = costs
+                self.last_execution_costs_percent = cost_percents
+                self.last_execution_cost_ts = event.ts
+                block_height = event.fields.get("block_height")
+                tx_count = event.fields.get("tx_count")
+                percent_full = event.fields.get("percent_full")
+                self.last_execution_cost_block_height = (
+                    block_height if isinstance(block_height, int) else None
+                )
+                self.last_execution_cost_tx_count = (
+                    tx_count if isinstance(tx_count, int) else None
+                )
+                self.last_execution_cost_percent_full = (
+                    percent_full if isinstance(percent_full, int) else None
+                )
+                self.execution_cost_history.append(
+                    {
+                        "ts": event.ts,
+                        "block_height": self.last_execution_cost_block_height,
+                        "tx_count": self.last_execution_cost_tx_count,
+                        "percent_full": self.last_execution_cost_percent_full,
+                        "costs": costs,
+                        "costs_percent": cost_percents,
+                    }
                 )
 
         elif event.kind == "node_stale_chunk":
@@ -1782,6 +1834,18 @@ class Detector:
                 if self.last_mempool_ts is None
                 else max(0.0, ts - self.last_mempool_ts)
             ),
+            "execution_cost_limits": dict(EXECUTION_COST_LIMITS),
+            "latest_execution_costs": self.last_execution_costs,
+            "latest_execution_costs_percent": self.last_execution_costs_percent,
+            "latest_execution_cost_block_height": self.last_execution_cost_block_height,
+            "latest_execution_cost_tx_count": self.last_execution_cost_tx_count,
+            "latest_execution_cost_percent_full": self.last_execution_cost_percent_full,
+            "latest_execution_cost_age_seconds": (
+                None
+                if self.last_execution_cost_ts is None
+                else max(0.0, ts - self.last_execution_cost_ts)
+            ),
+            "recent_execution_costs": list(self.execution_cost_history),
             "signer_proposal_age_seconds": (
                 None
                 if self.last_signer_proposal_ts is None

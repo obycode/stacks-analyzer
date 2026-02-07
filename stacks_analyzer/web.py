@@ -74,6 +74,98 @@ DASHBOARD_HTML = r"""<!doctype html>
     .grid .value {
       font-size: 22px;
     }
+    .chart-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .chart-card svg {
+      width: 100%;
+      height: 80px;
+      display: block;
+    }
+    .chart-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+    .chart-legend {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+    .chart-axis {
+      font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+      font-size: 11px;
+      font-weight: 400;
+      font-stretch: normal;
+      letter-spacing: normal;
+    }
+    .legend-dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+    .outcome-strip {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .outcome-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.4);
+    }
+    .outcome-approved { background: rgba(34, 197, 94, 0.8); }
+    .outcome-rejected { background: rgba(239, 68, 68, 0.8); }
+    .outcome-in-progress { background: rgba(56, 189, 248, 0.85); }
+    .outcome-unknown { background: rgba(148, 163, 184, 0.7); }
+    .cost-grid {
+      display: grid;
+      gap: 8px;
+    }
+    .cost-row {
+      display: grid;
+      grid-template-columns: 92px 1fr 58px;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .cost-label {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 10px;
+    }
+    .cost-track {
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.65);
+      border: 1px solid var(--line);
+      overflow: hidden;
+    }
+    .cost-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #22d3ee, #38bdf8);
+    }
+    .cost-value {
+      color: #cbd5e1;
+      text-align: right;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
     .card {
       background: var(--card);
       border: 1px solid var(--line);
@@ -279,6 +371,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .two { grid-template-columns: 1fr; }
       .sortition-grid { grid-template-columns: 1fr; }
+      .chart-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -301,6 +394,36 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="card"><div class="label">Signer Proposal Age</div><div class="value" id="proposalAge">-</div></div>
       <div class="card"><div class="label">Avg Block Interval</div><div class="value" id="avgBlockInterval">-</div></div>
       <div class="card"><div class="label">Mempool Ready Txs</div><div class="value" id="mempoolReady">-</div></div>
+    </div>
+
+    <div class="chart-grid">
+      <div class="card chart-card">
+        <div class="panel-title">Block Cadence (Last Tips)</div>
+        <svg id="blockCadenceChart"></svg>
+        <div class="chart-meta" id="blockCadenceMeta">No data yet</div>
+      </div>
+      <div class="card chart-card">
+        <div class="panel-title">Mempool Readiness</div>
+        <svg id="mempoolChart"></svg>
+        <div class="chart-meta" id="mempoolMeta">No data yet</div>
+        <div class="chart-legend">
+          <span><span class="legend-dot" style="background:#ef4444;"></span>DeadlineReached</span>
+        </div>
+      </div>
+      <div class="card chart-card">
+        <div class="panel-title">Execution Cost Usage</div>
+        <div id="executionCostBars"></div>
+        <div class="chart-meta" id="executionCostMeta">No mined block costs yet</div>
+      </div>
+      <div class="card chart-card">
+        <div class="panel-title">Proposal Outcomes</div>
+        <div class="outcome-strip" id="proposalStrip"></div>
+        <div class="chart-legend">
+          <span><span class="legend-dot outcome-approved"></span>Approved</span>
+          <span><span class="legend-dot outcome-in-progress"></span>In progress</span>
+          <span><span class="legend-dot outcome-rejected"></span>Rejected</span>
+        </div>
+      </div>
     </div>
 
     <div class="card">
@@ -453,15 +576,146 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (!key) return "#94a3b8";
       const hash = hashString(key);
       const hue = (hash * 137.508) % 360;
-      const sat = 65 + (hash % 20);
-      const light = 45 + (hash % 10);
-      return "hsl(" + hue.toFixed(0) + ", " + sat.toFixed(0) + "%, " + light.toFixed(0) + "%)";
+      const sat = 78;
+      const light = 56;
+      return "hsl(" + hue.toFixed(0) + ", " + sat + "%, " + light + "%)";
     }
 
     function minerName(key) {
       if (!key) return "Miner ?";
       const letter = String.fromCharCode(65 + (hashString(key) % 26));
       return "Miner " + letter;
+    }
+
+    function formatSecondsTick(value, range) {
+      if (!Number.isFinite(value)) return "-";
+      const absRange = Math.abs(range || 0);
+      if (absRange < 2) return value.toFixed(1) + "s";
+      if (absRange < 10) return Math.round(value) + "s";
+      return Math.round(value) + "s";
+    }
+
+    function formatCountTick(value, range) {
+      if (!Number.isFinite(value)) return "-";
+      if (Math.abs(range || 0) < 2) return value.toFixed(1);
+      return Math.round(value).toString();
+    }
+
+    function formatWindowTick(seconds) {
+      if (!Number.isFinite(seconds) || seconds <= 0) return "now";
+      if (seconds < 60) return Math.round(seconds) + "s";
+      if (seconds < 3600) return Math.round(seconds / 60) + "m";
+      if (seconds < 86400) return Math.round(seconds / 3600) + "h";
+      return Math.round(seconds / 86400) + "d";
+    }
+
+    const blockCadenceHistory = [];
+    const mempoolHistory = [];
+    let lastBlockHeight = null;
+    let lastMempoolEventTs = null;
+
+    function pushHistory(list, item, maxLen) {
+      list.push(item);
+      while (list.length > maxLen) list.shift();
+    }
+
+    function renderSparkline(svgId, series, options) {
+      const svg = document.getElementById(svgId);
+      if (!svg) return;
+      if (!series.length) {
+        svg.innerHTML = "";
+        return;
+      }
+      const rect = svg.getBoundingClientRect();
+      const width = Math.max(180, Math.round(rect.width || svg.clientWidth || 0));
+      const height = Math.max(48, Math.round(rect.height || svg.clientHeight || 0));
+      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+      svg.setAttribute("preserveAspectRatio", "xMinYMin meet");
+      const topPad = 8;
+      const rightPad = 8;
+      const bottomPad = options && options.showXAxis ? 16 : 8;
+      const labelPad = 4;
+      const values = series.map((item) => item.value);
+      const minValue = options && options.minZero ? 0 : Math.min(...values);
+      const maxValue = Math.max(...values);
+      const range = maxValue - minValue || 1;
+      const labelFor = options && options.labelFormat
+        ? (value, meta) => options.labelFormat(value, meta)
+        : (value) => String(value);
+      const meta = { min: minValue, max: maxValue, range };
+      let maxLabel = labelFor(maxValue, meta);
+      let midLabel = labelFor(minValue + range / 2, meta);
+      let minLabel = labelFor(minValue, meta);
+      if (maxLabel === midLabel) midLabel = "";
+      if (midLabel === minLabel) midLabel = "";
+      const leftColumn = [maxLabel, midLabel, minLabel].filter((label) => label !== "");
+      const leftWidth = Math.min(
+        42,
+        Math.max(24, ...leftColumn.map((label) => (String(label).length || 1) * 6.2))
+      );
+      const axisX = leftWidth + 2;
+      const plotWidth = width - axisX - rightPad;
+      const points = values.map((value, index) => {
+        const x = axisX + (index / Math.max(1, values.length - 1)) * plotWidth;
+        const y =
+          height - bottomPad - ((value - minValue) / range) * (height - topPad - bottomPad);
+        return [x, y];
+      });
+      const line = points
+        .map((pt, index) => (index === 0 ? "M" : "L") + pt[0].toFixed(2) + " " + pt[1].toFixed(2))
+        .join(" ");
+      const area =
+        line +
+        " L " +
+        points[points.length - 1][0].toFixed(2) +
+        " " +
+        (height - bottomPad).toFixed(2) +
+        " L " +
+        points[0][0].toFixed(2) +
+        " " +
+        (height - bottomPad).toFixed(2) +
+        " Z";
+      let markers = "";
+      if (options && options.markerKey) {
+        const markerKey = options.markerKey;
+        markers = series.map((item, index) => {
+          if (!item[markerKey]) return "";
+          const x = axisX + (index / Math.max(1, values.length - 1)) * plotWidth;
+          return (
+            "<line x1='" +
+            x.toFixed(2) +
+            "' x2='" +
+            x.toFixed(2) +
+            "' y1='" +
+            topPad +
+            "' y2='" +
+            (height - bottomPad) +
+            "' stroke='rgba(239, 68, 68, 0.8)' stroke-width='1'/>"
+          );
+        }).join("");
+      }
+      const yTop = topPad;
+      const yMid = (height - bottomPad + topPad) / 2;
+      const yBot = height - bottomPad;
+      const firstTs = Number(series[0] && series[0].ts);
+      const lastTs = Number(series[series.length - 1] && series[series.length - 1].ts);
+      const windowSeconds =
+        Number.isFinite(firstTs) && Number.isFinite(lastTs) ? Math.max(0, lastTs - firstTs) : null;
+      const xLeft = windowSeconds === null ? "" : "-" + formatWindowTick(windowSeconds);
+      const xRight = windowSeconds === null ? "" : "now";
+      svg.innerHTML =
+        "<line x1='" + axisX + "' x2='" + axisX + "' y1='" + yTop + "' y2='" + yBot + "' stroke='rgba(148, 163, 184, 0.24)' stroke-width='0.6' />" +
+        "<line x1='" + axisX + "' x2='" + (axisX + plotWidth) + "' y1='" + yTop + "' y2='" + yTop + "' stroke='rgba(148, 163, 184, 0.2)' stroke-width='0.6' />" +
+        "<line x1='" + axisX + "' x2='" + (axisX + plotWidth) + "' y1='" + yMid + "' y2='" + yMid + "' stroke='rgba(148, 163, 184, 0.16)' stroke-width='0.6' />" +
+        "<line x1='" + axisX + "' x2='" + (axisX + plotWidth) + "' y1='" + yBot + "' y2='" + yBot + "' stroke='rgba(148, 163, 184, 0.2)' stroke-width='0.6' />" +
+        (maxLabel ? "<text class='chart-axis' x='" + (labelPad) + "' y='" + (yTop + 3) + "' fill='#94a3b8'>" + maxLabel + "</text>" : "") +
+        (midLabel ? "<text class='chart-axis' x='" + (labelPad) + "' y='" + (yMid + 3) + "' fill='#94a3b8'>" + midLabel + "</text>" : "") +
+        (minLabel ? "<text class='chart-axis' x='" + (labelPad) + "' y='" + (yBot + 3) + "' fill='#94a3b8'>" + minLabel + "</text>" : "") +
+        (xLeft ? "<text class='chart-axis' x='" + axisX + "' y='" + (height - 2) + "' fill='#94a3b8'>" + xLeft + "</text>" : "") +
+        (xRight ? "<text class='chart-axis' x='" + (axisX + plotWidth) + "' y='" + (height - 2) + "' text-anchor='end' fill='#94a3b8'>" + xRight + "</text>" : "") +
+        "<path d='" + area + "' fill='rgba(56, 189, 248, 0.08)' />" +
+        "<path d='" + line + "' fill='none' stroke='rgba(56, 189, 248, 0.9)' stroke-width='1.0' />" +
+        markers;
     }
 
     function linkifyAlertMessage(alert) {
@@ -606,6 +860,55 @@ DASHBOARD_HTML = r"""<!doctype html>
       document.getElementById("btcHeight").textContent = "BTC: " + (btc === null || btc === undefined ? "-" : btc);
       document.getElementById("stxHeight").textContent = "STX: " + (stx === null || stx === undefined ? "-" : stx);
 
+      if (stx !== null && stx !== undefined && stx !== lastBlockHeight) {
+        if (data.last_block_interval_seconds !== null && data.last_block_interval_seconds !== undefined) {
+          pushHistory(blockCadenceHistory, {
+            value: Number(data.last_block_interval_seconds),
+            ts: data.timestamp || nowEpoch,
+          }, 120);
+        }
+        lastBlockHeight = stx;
+      }
+      renderSparkline("blockCadenceChart", blockCadenceHistory, {
+        showXAxis: true,
+        labelFormat: (value, meta) => formatSecondsTick(value, meta.range),
+      });
+      const cadenceMeta = document.getElementById("blockCadenceMeta");
+      if (blockCadenceHistory.length) {
+        const latest = blockCadenceHistory[blockCadenceHistory.length - 1];
+        const avg = data.avg_block_interval_seconds;
+        cadenceMeta.textContent = "last " + fmtAge(latest.value) + " | avg " + (avg ? fmtAge(avg) : "-");
+      } else {
+        cadenceMeta.textContent = "No cadence samples yet";
+      }
+
+      const mempoolAge = data.mempool_age_seconds;
+      const mempoolEventTs = (mempoolAge !== null && mempoolAge !== undefined && data.timestamp)
+        ? data.timestamp - mempoolAge
+        : null;
+      if (mempoolEventTs !== null && mempoolEventTs !== undefined && mempoolEventTs !== lastMempoolEventTs) {
+        pushHistory(mempoolHistory, {
+          value: Number(data.mempool_ready_txs || 0),
+          ts: mempoolEventTs,
+          deadline: data.mempool_stop_reason === "DeadlineReached",
+        }, 160);
+        lastMempoolEventTs = mempoolEventTs;
+      }
+      renderSparkline("mempoolChart", mempoolHistory, {
+        minZero: true,
+        markerKey: "deadline",
+        showXAxis: true,
+        labelFormat: (value, meta) => formatCountTick(value, meta.range),
+      });
+      const mempoolMeta = document.getElementById("mempoolMeta");
+      if (mempoolHistory.length) {
+        const latest = mempoolHistory[mempoolHistory.length - 1];
+        const reason = data.mempool_stop_reason ? " | " + data.mempool_stop_reason : "";
+        mempoolMeta.textContent = "ready " + latest.value + " txs" + reason;
+      } else {
+        mempoolMeta.textContent = "No mempool samples yet";
+      }
+
       const alerts = data.recent_alerts || [];
       const alertsBody = document.getElementById("alertsBody");
       alertsBody.innerHTML = alerts.slice().reverse().slice(0, 20).map((item) => {
@@ -613,6 +916,93 @@ DASHBOARD_HTML = r"""<!doctype html>
         const sevClass = "sev sev-" + (sev === "warning" ? "warning" : sev === "critical" ? "critical" : sev === "info" ? "info" : "ok");
         return "<tr><td>" + escapeHtml(new Date(item.ts * 1000).toLocaleTimeString()) + "</td><td><span class='" + sevClass + "'>" + escapeHtml(sev) + "</span></td><td>" + linkifyAlertMessage(item) + "</td></tr>";
       }).join("");
+
+      const costBars = document.getElementById("executionCostBars");
+      const costMeta = document.getElementById("executionCostMeta");
+      const costLimits = data.execution_cost_limits || {};
+      const latestCostPercent = data.latest_execution_costs_percent || {};
+      const latestCosts = data.latest_execution_costs || {};
+      const latestCostHeight = data.latest_execution_cost_block_height;
+      const latestCostTxCount = data.latest_execution_cost_tx_count;
+      const latestCostFull = data.latest_execution_cost_percent_full;
+      const latestCostAge = data.latest_execution_cost_age_seconds;
+      const dimensions = [
+        ["runtime", "Runtime"],
+        ["write_len", "Write Len"],
+        ["write_cnt", "Write Cnt"],
+        ["read_len", "Read Len"],
+        ["read_cnt", "Read Cnt"],
+      ];
+      const hasCosts = dimensions.some(([key]) => latestCostPercent[key] !== undefined && latestCostPercent[key] !== null);
+      if (!hasCosts) {
+        costBars.innerHTML = "<div class='muted'>No mined block costs yet.</div>";
+        costMeta.textContent = "No mined block costs yet";
+      } else {
+        costBars.innerHTML =
+          "<div class='cost-grid'>" +
+          dimensions
+            .map(([key, label]) => {
+              const pct = Number(latestCostPercent[key] || 0);
+              const raw = latestCosts[key];
+              const limit = costLimits[key];
+              const valueText =
+                Number.isFinite(raw) && Number.isFinite(limit)
+                  ? Number(raw).toLocaleString() + "/" + Number(limit).toLocaleString()
+                  : "-";
+              const fillColor =
+                pct >= 85 ? "#ef4444" : pct >= 70 ? "#f59e0b" : "#38bdf8";
+              return (
+                "<div class='cost-row'>" +
+                "<div class='cost-label'>" +
+                escapeHtml(label) +
+                "</div>" +
+                "<div class='cost-track' title='" +
+                escapeHtml(valueText) +
+                "'>" +
+                "<div class='cost-fill' style='width:" +
+                Math.max(0, Math.min(100, pct)).toFixed(1) +
+                "%; background:" +
+                fillColor +
+                ";'></div>" +
+                "</div>" +
+                "<div class='cost-value'>" +
+                pct.toFixed(1) +
+                "%</div>" +
+                "</div>"
+              );
+            })
+            .join("") +
+          "</div>";
+        const metaParts = [];
+        if (Number.isFinite(latestCostHeight)) metaParts.push("height " + latestCostHeight);
+        if (Number.isFinite(latestCostTxCount)) metaParts.push("txs " + latestCostTxCount);
+        if (Number.isFinite(latestCostFull)) metaParts.push("percent_full " + latestCostFull + "%");
+        if (Number.isFinite(latestCostAge)) metaParts.push("updated " + fmtAge(Number(latestCostAge)) + " ago");
+        costMeta.textContent = metaParts.join(" | ") || "Latest mined block costs";
+      }
+
+      const recentProposalItems = (data.recent_proposals || []).slice(0, 40);
+
+      const proposalStrip = document.getElementById("proposalStrip");
+      if (!recentProposalItems.length) {
+        proposalStrip.innerHTML = "<div class='muted'>No proposals yet.</div>";
+      } else {
+        const ordered = recentProposalItems
+          .slice()
+          .sort((a, b) => (b.last_update_ts || 0) - (a.last_update_ts || 0));
+        proposalStrip.innerHTML = ordered.map((item) => {
+          const status = item.status || (item.is_open ? "in_progress" : "approved");
+          const cls = status === "approved"
+            ? "outcome-dot outcome-approved"
+            : status === "rejected"
+              ? "outcome-dot outcome-rejected"
+              : status === "in_progress"
+                ? "outcome-dot outcome-in-progress"
+                : "outcome-dot outcome-unknown";
+          const title = (item.signature_hash ? item.signature_hash.slice(0, 12) : "proposal") + " " + status;
+          return "<span class='" + cls + "' title='" + escapeHtml(title) + "'></span>";
+        }).join("");
+      }
 
       const reports = data.recent_reports || [];
       const reportsBody = document.getElementById("reportsBody");

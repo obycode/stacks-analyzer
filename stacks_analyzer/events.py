@@ -1,5 +1,6 @@
 import re
 import time
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -41,6 +42,7 @@ NAKAMOTO_BLOCK_RE = re.compile(
 MEMPOOL_ITERATION_RE = re.compile(
     r"Mempool iteration finished"
 )
+EXECUTION_CONSUMED_RE = re.compile(r'execution_consumed:\s*(\{[^}]+\})')
 
 
 def extract_timestamp(line: str) -> float:
@@ -76,6 +78,63 @@ class LogParser:
         events: List[ParsedEvent] = []
 
         if source == "node":
+            if "Miner: mined Nakamoto block" in line:
+                block_height = extract_field(line, "height")
+                tx_count = extract_field(line, "tx_count")
+                percent_full = extract_field(line, "percent_full")
+                execution_consumed = None
+                execution_match = EXECUTION_CONSUMED_RE.search(line)
+                if execution_match:
+                    try:
+                        parsed = json.loads(execution_match.group(1))
+                        if isinstance(parsed, dict):
+                            execution_consumed = parsed
+                    except ValueError:
+                        execution_consumed = None
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_mined_nakamoto_block",
+                        ts=ts,
+                        fields={
+                            "block_height": int(block_height) if block_height else None,
+                            "tx_count": int(tx_count) if tx_count else None,
+                            "percent_full": int(percent_full) if percent_full else None,
+                            "runtime": (
+                                int(execution_consumed.get("runtime"))
+                                if isinstance(execution_consumed, dict)
+                                and execution_consumed.get("runtime") is not None
+                                else None
+                            ),
+                            "write_len": (
+                                int(execution_consumed.get("write_len"))
+                                if isinstance(execution_consumed, dict)
+                                and execution_consumed.get("write_len") is not None
+                                else None
+                            ),
+                            "write_cnt": (
+                                int(execution_consumed.get("write_cnt"))
+                                if isinstance(execution_consumed, dict)
+                                and execution_consumed.get("write_cnt") is not None
+                                else None
+                            ),
+                            "read_len": (
+                                int(execution_consumed.get("read_len"))
+                                if isinstance(execution_consumed, dict)
+                                and execution_consumed.get("read_len") is not None
+                                else None
+                            ),
+                            "read_cnt": (
+                                int(execution_consumed.get("read_cnt"))
+                                if isinstance(execution_consumed, dict)
+                                and execution_consumed.get("read_cnt") is not None
+                                else None
+                            ),
+                        },
+                        line=line,
+                    )
+                )
+
             if "Mempool iteration finished" in line:
                 considered_txs = extract_field(line, "considered_txs")
                 elapsed_ms = extract_field(line, "elapsed_ms")

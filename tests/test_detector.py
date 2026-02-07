@@ -221,6 +221,43 @@ class TestDetector(unittest.TestCase):
             )
         )
 
+    def test_snapshot_includes_latest_execution_cost_percentages(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_mined_nakamoto_block",
+                ts=100.0,
+                fields={
+                    "block_height": 6398580,
+                    "tx_count": 4,
+                    "percent_full": 83,
+                    "runtime": 312966534,
+                    "write_len": 309422,
+                    "write_cnt": 2876,
+                    "read_len": 83413180,
+                    "read_cnt": 219,
+                },
+            )
+        )
+
+        snapshot = detector.snapshot(now=110.0)
+        self.assertEqual(snapshot["latest_execution_cost_block_height"], 6398580)
+        self.assertEqual(snapshot["latest_execution_cost_tx_count"], 4)
+        self.assertEqual(snapshot["latest_execution_cost_percent_full"], 83)
+        self.assertAlmostEqual(
+            snapshot["latest_execution_costs_percent"]["runtime"], 6.25933068, places=4
+        )
+        self.assertAlmostEqual(
+            snapshot["latest_execution_costs_percent"]["read_len"], 83.41318, places=4
+        )
+        self.assertAlmostEqual(snapshot["latest_execution_cost_age_seconds"], 10.0)
+
     def test_boundary_timeout_emits_warning(self) -> None:
         detector = Detector(
             DetectorConfig(

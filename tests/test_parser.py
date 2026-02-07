@@ -268,6 +268,32 @@ class TestLogParser(unittest.TestCase):
             "35c140e1dc254ab7e761a1951093b369e34d279c52c9493b81584fb688a7d3e8",
         )
 
+    def test_parse_node_mined_nakamoto_block_execution_costs(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 07 13:20:25 obynuc stacks-node[224726]: INFO [1770488425.029337] "
+            "[stackslib/src/chainstate/nakamoto/miner.rs:772] "
+            "Miner: mined Nakamoto block, stacks_block_hash: 608678ea, "
+            "stacks_block_id: 1b49e4a0, height: 6398580, tx_count: 4, "
+            "parent_block_id: 57a70a04, block_size: 897, "
+            'execution_consumed: {"runtime": 312966534, "write_len": 309422, '
+            '"write_cnt": 2876, "read_len": 83413180, "read_cnt": 219}, '
+            "percent_full: 83, assembly_time_ms: 475, consensus_hash: 6cd01af5"
+        )
+
+        events = parser.parse_line("node", line)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.kind, "node_mined_nakamoto_block")
+        self.assertEqual(event.fields["block_height"], 6398580)
+        self.assertEqual(event.fields["tx_count"], 4)
+        self.assertEqual(event.fields["percent_full"], 83)
+        self.assertEqual(event.fields["runtime"], 312966534)
+        self.assertEqual(event.fields["write_len"], 309422)
+        self.assertEqual(event.fields["write_cnt"], 2876)
+        self.assertEqual(event.fields["read_len"], 83413180)
+        self.assertEqual(event.fields["read_cnt"], 219)
+
 
 if __name__ == "__main__":
     unittest.main()
