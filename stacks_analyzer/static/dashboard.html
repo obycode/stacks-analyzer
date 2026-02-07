@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stacks Analyzer Dashboard</title>
+    <link rel="stylesheet" href="/static/dashboard.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <h1>Stacks Analyzer</h1>
+      </div>
+      <div class="header-right">
+        <div class="height-chip" id="btcHeight">BTC: -</div>
+        <div class="height-chip" id="stxHeight">STX: -</div>
+        <div class="muted" id="updated">Waiting for data...</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">-</div></div>
+      <div class="card"><div class="label">Node Tip Age</div><div class="value" id="tipAge">-</div></div>
+      <div class="card"><div class="label">Signer Proposal Age</div><div class="value" id="proposalAge">-</div></div>
+      <div class="card"><div class="label">Avg Block Interval</div><div class="value" id="avgBlockInterval">-</div></div>
+      <div class="card"><div class="label">Mempool Ready Txs</div><div class="value" id="mempoolReady">-</div></div>
+    </div>
+
+    <div class="chart-grid">
+      <div class="card chart-card">
+        <div class="panel-title">Block Cadence (Last Tips)</div>
+        <svg id="blockCadenceChart"></svg>
+        <div class="chart-meta" id="blockCadenceMeta">No data yet</div>
+      </div>
+      <div class="card chart-card">
+        <div class="panel-title">Mempool Readiness</div>
+        <svg id="mempoolChart"></svg>
+        <div class="chart-meta" id="mempoolMeta">No data yet</div>
+        <div class="chart-legend">
+          <span><span class="legend-dot" style="background:#ef4444;"></span>DeadlineReached</span>
+        </div>
+      </div>
+      <div class="card chart-card">
+        <div class="panel-title">Execution Cost Usage</div>
+        <div id="executionCostBars"></div>
+        <div class="chart-meta" id="executionCostMeta">No mined block costs yet</div>
+      </div>
+      <div class="card chart-card">
+        <div class="panel-title">Proposal Outcomes</div>
+        <div class="outcome-strip" id="proposalStrip"></div>
+        <div class="chart-legend">
+          <span><span class="legend-dot outcome-approved"></span>Approved</span>
+          <span><span class="legend-dot outcome-in-progress"></span>In progress</span>
+          <span><span class="legend-dot outcome-rejected"></span>Rejected</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="panel-title">Recent Proposals (Latest 5)</div>
+      <table>
+        <thead>
+          <tr><th>Signature Hash</th><th>Status</th><th>Block Height</th><th>Age</th><th>Max Seen</th><th>Threshold</th></tr>
+        </thead>
+        <tbody id="proposalsBody"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="panel-title">Recent Sortitions (Latest 3 Burn Heights)</div>
+      <div class="sortition-grid" id="sortitionCards"></div>
+    </div>
+
+    <div class="card">
+      <div class="panel-title">Last 5 Tenure Extends</div>
+      <table>
+        <thead>
+          <tr><th>Seen</th><th>Kind</th><th>Stacks Block Height</th><th>Burn Height</th><th>Txid</th></tr>
+        </thead>
+        <tbody id="tenureExtendsBody"></tbody>
+      </table>
+    </div>
+
+    <div class="two">
+      <div class="card">
+        <div class="panel-title">Recent Alerts</div>
+        <table>
+          <thead>
+            <tr><th>Time</th><th>Severity</th><th>Message</th></tr>
+          </thead>
+          <tbody id="alertsBody"></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="panel-title">All Signers</div>
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Signer Key</th><th>Weight</th><th>Weight %</th><th>Participation</th></tr>
+          </thead>
+          <tbody id="signersBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="panel-title">Recent Reports</div>
+      <table>
+        <thead>
+          <tr><th>Time</th><th>Severity</th><th>Alert</th><th>Report</th></tr>
+        </thead>
+        <tbody id="reportsBody"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="panel-title">Counters</div>
+      <table>
+        <tbody id="countsBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stacks Analyzer Report</title>
+    <link rel="stylesheet" href="/static/report.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <h1>Alert Report</h1>
+      <a class="link" href="/">Back to dashboard</a>
+    </div>
+    <div class="report-grid">
+      <div class="card report-hero" id="summaryCard">
+        <div class="muted">Loading report...</div>
+      </div>
+      <div class="card report-section" id="proposalTimelineCard"></div>
+      <div class="report-columns">
+        <div class="stack">
+          <div class="card report-section">
+            <div class="card-title">
+              <h2>Context</h2>
+            </div>
+            <div id="contextBody" class="kv"></div>
+          </div>
+          <div class="card report-section">
+            <div class="card-title">
+              <h2>Recent Events</h2>
+              <span class="muted">Most recent first</span>
+            </div>
+            <div id="eventsBody" class="scroll-panel"></div>
+          </div>
+          <div class="card report-section">
+            <div class="card-title">
+              <h2>Snapshot (Raw)</h2>
+            </div>
+            <details class="event-details">
+              <summary>Show snapshot JSON</summary>
+              <pre id="snapshotBody"></pre>
+            </details>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="card report-section">
+            <div class="card-title">
+              <h2>Recent Alerts</h2>
+            </div>
+            <div id="alertsBody" class="scroll-panel"></div>
+          </div>
+          <div class="card report-section">
+            <div class="card-title">
+              <h2>Recent Rejections</h2>
+            </div>
+            <div id="rejectionsBody" class="scroll-panel"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+    <script src="/static/report.js"></script>
+</body>
+</html>
