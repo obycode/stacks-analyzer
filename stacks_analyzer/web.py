@@ -751,6 +751,34 @@ REPORT_HTML = """<!doctype html>
       align-items: center;
       gap: 8px;
     }
+    .timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .timeline-item {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: rgba(8, 16, 24, 0.45);
+    }
+    .timeline-time {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .timeline-title {
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .timeline-meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
     .scroll-panel {
       max-height: 360px;
       overflow: auto;
@@ -862,6 +890,7 @@ REPORT_HTML = """<!doctype html>
       <div class="card report-hero" id="summaryCard">
         <div class="muted">Loading report...</div>
       </div>
+      <div class="card report-section" id="proposalTimelineCard"></div>
       <div class="report-columns">
         <div class="stack">
           <div class="card report-section">
@@ -923,6 +952,64 @@ REPORT_HTML = """<!doctype html>
       return "<a class='link' href='" + url + "'>" + label + "</a>";
     }
 
+    function shortHash(value, chars) {
+      if (!value) return "-";
+      const text = String(value);
+      if (text.length <= chars) return text;
+      return text.slice(0, chars) + "..";
+    }
+
+    function formatTimelineItem(item, targetSig) {
+      const data = item.data || {};
+      const kind = item.kind || "event";
+      const signer = data.signer_pubkey ? shortHash(data.signer_pubkey, 12) : null;
+      const sig = data.signer_signature_hash ? shortHash(data.signer_signature_hash, 12) : null;
+      const sigNote = sig && targetSig && sig !== targetSig ? " | sig " + sig : "";
+      const height = data.block_height || data.burn_height;
+      let title = kind;
+      let meta = "";
+      if (kind === "signer_block_proposal") {
+        title = "Proposal received";
+        meta = "block_height " + (data.block_height ?? "-") + " | burn_height " + (data.burn_height ?? "-") + sigNote;
+      } else if (kind === "signer_block_acceptance") {
+        title = "Signer acceptance";
+        meta = (signer ? "signer " + signer + " | " : "") + "approved " + (data.percent_approved ? data.percent_approved.toFixed(1) + "%" : "n/a") + sigNote;
+      } else if (kind === "signer_block_rejection") {
+        title = "Signer rejection";
+        meta = (signer ? "signer " + signer + " | " : "") + "rejected " + (data.percent_rejected ? data.percent_rejected.toFixed(1) + "%" : "n/a") + " | reason " + (data.reject_reason || "-") + sigNote;
+      } else if (kind === "signer_threshold_reached") {
+        title = "Threshold reached";
+        meta = (signer ? "signer " + signer + " | " : "") + "approved " + (data.percent_approved ? data.percent_approved.toFixed(1) + "%" : "n/a") + sigNote;
+      } else if (kind === "signer_block_pushed") {
+        title = "Block pushed";
+        meta = "block_height " + (data.block_height ?? "-") + sigNote;
+      } else if (kind === "signer_new_block_event") {
+        title = "New block event";
+        meta = "block_height " + (data.block_height ?? "-") + sigNote;
+      } else if (kind === "node_consensus") {
+        title = "Burn block consensus";
+        meta = "burn_height " + (data.burn_height ?? "-") + " | " + shortHash(data.consensus_hash, 16);
+      } else if (kind === "node_tenure_change") {
+        title = "Tenure change";
+        meta = "kind " + (data.tenure_change_kind || "-") + " | block_height " + (data.block_height ?? "-");
+      } else if (kind === "node_sortition_winner_selected") {
+        title = "Sortition winner selected";
+        meta = "burn_height " + (data.burn_height ?? "-") + " | " + shortHash(data.winner_txid, 12);
+      } else if (kind === "node_sortition_winner_rejected") {
+        title = "Sortition winner rejected";
+        meta = "burn_height " + (data.burn_height ?? "-") + " | " + (data.rejection_reason || "unknown");
+      } else if (height) {
+        meta = "height " + height;
+      }
+      return "<div class='timeline-item'>" +
+        "<div class='timeline-time'>" + escapeHtml(fmtTime(item.ts)) + "</div>" +
+        "<div>" +
+        "<div class='timeline-title'>" + escapeHtml(title) + "</div>" +
+        "<div class='timeline-meta'>" + escapeHtml(meta) + "</div>" +
+        "</div>" +
+        "</div>";
+    }
+
     function renderReport(report) {
       if (!report) {
         document.getElementById("summaryCard").innerHTML = "<div class='muted'>Report not found.</div>";
@@ -941,6 +1028,26 @@ REPORT_HTML = """<!doctype html>
         "<div class='summary-meta'>Time: " + escapeHtml(fmtTime(report.ts)) + "</div>" +
         "<a class='btn' href='/api/report-logs?id=" + encodeURIComponent(report.id) + "'>Download Logs</a>" +
         "</div>";
+
+      const proposalTimeline = report.data && report.data.proposal_timeline ? report.data.proposal_timeline : null;
+      const timelineCard = document.getElementById("proposalTimelineCard");
+      if (!proposalTimeline || !proposalTimeline.events || !proposalTimeline.events.length) {
+        timelineCard.style.display = "none";
+      } else {
+        const meta = proposalTimeline.meta || {};
+        const targetSig = meta.signature_hash ? shortHash(meta.signature_hash, 12) : null;
+        const metaLine = [
+          meta.signature_hash ? "sig " + shortHash(meta.signature_hash, 12) : null,
+          meta.block_height ? "height " + meta.block_height : null,
+          meta.burn_height ? "burn " + meta.burn_height : null,
+        ].filter(Boolean).join(" | ");
+        const items = proposalTimeline.events.map((item) => formatTimelineItem(item, targetSig)).join("");
+        timelineCard.style.display = "block";
+        timelineCard.innerHTML =
+          "<div class='card-title'><h2>Proposal Timeline</h2></div>" +
+          "<div class='muted'>" + escapeHtml(metaLine || "Proposal context") + "</div>" +
+          "<div class='timeline'>" + items + "</div>";
+      }
 
       const snapshot = report.data && report.data.snapshot ? report.data.snapshot : null;
       document.getElementById("snapshotBody").textContent = snapshot ? JSON.stringify(snapshot, null, 2) : "n/a";
@@ -965,6 +1072,7 @@ REPORT_HTML = """<!doctype html>
         : "<div class='muted'>No snapshot data.</div>";
 
       const alerts = (report.data && report.data.recent_alerts) || [];
+      alerts.sort((a, b) => (b.ts || 0) - (a.ts || 0));
       if (!alerts.length) {
         document.getElementById("alertsBody").innerHTML = "<div class='muted'>No alerts captured.</div>";
       } else {

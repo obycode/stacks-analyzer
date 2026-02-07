@@ -299,6 +299,12 @@ class MonitoringService:
             )
             if alert.severity in ("warning", "critical"):
                 recent_events = self.history_store.report_context_events(alert.ts)
+                proposal_timeline = None
+                signature_hash = self._extract_signature_hash(alert)
+                if signature_hash:
+                    proposal_timeline = self._build_proposal_timeline(
+                        signature_hash, recent_events
+                    )
                 report_payload = {
                     "alert": {
                         "ts": alert.ts,
@@ -310,6 +316,7 @@ class MonitoringService:
                     "recent_events": recent_events,
                     "recent_alerts": list(self.recent_alerts)[-20:],
                     "recent_rejections": recent_rejections,
+                    "proposal_timeline": proposal_timeline,
                 }
                 report_id = self.history_store.create_report(
                     ts=alert.ts,
@@ -350,6 +357,78 @@ class MonitoringService:
             limit=limit,
         )
         return {"events": events}
+
+    def _extract_signature_hash(self, alert: Alert) -> Optional[str]:
+        for value in (alert.key, alert.message):
+            if not isinstance(value, str):
+                continue
+            match = re.search(r"([0-9a-f]{64})", value)
+            if match:
+                return match.group(1)
+        return None
+
+    def _build_proposal_timeline(
+        self, signature_hash: str, recent_events: list
+    ) -> Optional[Dict[str, Any]]:
+        proposal_events: list = []
+        context_events: list = []
+        related_hashes: Set[str] = set()
+        meta: Dict[str, Any] = {
+            "signature_hash": signature_hash,
+        }
+
+        for event in recent_events:
+            data = event.get("data") or {}
+            if data.get("signer_signature_hash") == signature_hash:
+                proposal_events.append(event)
+                for key in ("block_height", "burn_height", "consensus_hash", "block_id"):
+                    if key not in meta and data.get(key) is not None:
+                        meta[key] = data.get(key)
+
+        if not proposal_events:
+            return None
+
+        block_height = meta.get("block_height")
+        for event in recent_events:
+            data = event.get("data") or {}
+            if block_height is not None and data.get("block_height") == block_height:
+                if event.get("kind") in (
+                    "signer_block_proposal",
+                    "signer_block_acceptance",
+                    "signer_block_rejection",
+                    "signer_rejection_threshold_reached",
+                    "signer_threshold_reached",
+                    "signer_block_pushed",
+                    "signer_new_block_event",
+                ):
+                    proposal_events.append(event)
+                    other_hash = data.get("signer_signature_hash")
+                    if isinstance(other_hash, str) and other_hash:
+                        related_hashes.add(other_hash)
+
+        if related_hashes:
+            meta["related_signature_hashes"] = sorted(related_hashes)
+
+        burn_height = meta.get("burn_height")
+        for event in recent_events:
+            if event.get("kind") in (
+                "node_consensus",
+                "node_tenure_change",
+                "node_sortition_winner_selected",
+                "node_sortition_winner_rejected",
+            ):
+                data = event.get("data") or {}
+                if burn_height is None or data.get("burn_height") == burn_height:
+                    context_events.append(event)
+
+        timeline = sorted(
+            proposal_events + context_events,
+            key=lambda item: item.get("ts") or 0,
+        )
+        return {
+            "meta": meta,
+            "events": timeline,
+        }
 
     def _alerts_api(self, params: Dict[str, list]) -> Dict[str, Any]:
         if self.history_store is None:
