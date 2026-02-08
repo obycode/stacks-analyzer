@@ -114,6 +114,7 @@ class Detector:
         self.last_mempool_stop_reason: Optional[str] = None
         self.last_mempool_elapsed_ms: Optional[int] = None
         self.last_mempool_ts: Optional[float] = None
+        self.mempool_iteration_history: Deque[Dict[str, object]] = deque(maxlen=720)
         self.last_execution_costs: Optional[Dict[str, int]] = None
         self.last_execution_costs_percent: Optional[Dict[str, float]] = None
         self.last_execution_cost_ts: Optional[float] = None
@@ -299,6 +300,16 @@ class Detector:
             )
             if isinstance(elapsed_ms, int):
                 self.last_mempool_elapsed_ms = elapsed_ms
+            self.mempool_iteration_history.append(
+                {
+                    "ts": event.ts,
+                    "considered_txs": (
+                        considered_txs if isinstance(considered_txs, int) else None
+                    ),
+                    "stop_reason": stop_reason if isinstance(stop_reason, str) else None,
+                    "elapsed_ms": elapsed_ms if isinstance(elapsed_ms, int) else None,
+                }
+            )
             if isinstance(stop_reason, str) and stop_reason == "NoMoreCandidates":
                 if isinstance(considered_txs, int):
                     self.last_mempool_ready_txs = considered_txs
@@ -2156,6 +2167,7 @@ class Detector:
             "mempool_ready_ts": self.last_mempool_ready_ts,
             "mempool_stop_reason": self.last_mempool_stop_reason,
             "mempool_elapsed_ms": self.last_mempool_elapsed_ms,
+            "recent_mempool_iterations": list(self.mempool_iteration_history),
             "mempool_age_seconds": (
                 None
                 if self.last_mempool_ts is None

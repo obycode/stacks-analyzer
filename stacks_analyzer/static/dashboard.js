@@ -132,6 +132,9 @@
     let reportsNewestFirst = [];
     let lastBlockHeight = null;
     let lastMempoolEventTs = null;
+    let lastMempoolSampleKey = null;
+    let seededBlockCadence = false;
+    let seededMempoolHistory = false;
     const COST_DIMENSIONS = [
       { key: "runtime", label: "Runtime", color: "#f59e0b" },
       { key: "write_len", label: "Write Len", color: "#22d3ee" },
@@ -143,6 +146,66 @@
     function pushHistory(list, item, maxLen) {
       list.push(item);
       while (list.length > maxLen) list.shift();
+    }
+
+    function seedBlockCadenceFromState(data) {
+      if (seededBlockCadence || blockCadenceHistory.length) return;
+      const all = (data.recent_confirmed_blocks || [])
+        .filter((item) => Number.isFinite(Number(item && item.ts)))
+        .slice()
+        .sort((a, b) => Number(a.ts) - Number(b.ts));
+      if (!all.length) return;
+      const nodeOnly = all.filter((item) => item.source === "node");
+      const source = nodeOnly.length >= 2 ? nodeOnly : all;
+      for (let i = 1; i < source.length; i += 1) {
+        const prevTs = Number(source[i - 1].ts);
+        const ts = Number(source[i].ts);
+        const interval = ts - prevTs;
+        if (Number.isFinite(interval) && interval > 0 && interval <= 600) {
+          pushHistory(
+            blockCadenceHistory,
+            {
+              value: interval,
+              ts,
+            },
+            120
+          );
+        }
+      }
+      seededBlockCadence = true;
+    }
+
+    function seedMempoolFromState(data) {
+      if (seededMempoolHistory || mempoolHistory.length) return;
+      const rows = (data.recent_mempool_iterations || [])
+        .filter((item) => Number.isFinite(Number(item && item.ts)))
+        .slice()
+        .sort((a, b) => Number(a.ts) - Number(b.ts));
+      if (!rows.length) return;
+      for (const row of rows) {
+        const considered = Number(row && row.considered_txs);
+        if (!Number.isFinite(considered)) continue;
+        pushHistory(
+          mempoolHistory,
+          {
+            value: considered,
+            ts: Number(row.ts),
+            deadline: row.stop_reason === "DeadlineReached",
+          },
+          160
+        );
+      }
+      if (mempoolHistory.length) {
+        const lastRow = rows[rows.length - 1];
+        lastMempoolEventTs = mempoolHistory[mempoolHistory.length - 1].ts;
+        lastMempoolSampleKey =
+          String(Number(lastRow.ts)) +
+          "|" +
+          String(Number(lastRow.considered_txs)) +
+          "|" +
+          String(lastRow.stop_reason || "");
+      }
+      seededMempoolHistory = true;
     }
 
     function renderSparkline(svgId, series, options) {
@@ -791,6 +854,9 @@
       document.getElementById("btcHeight").textContent = "BTC: " + (btc === null || btc === undefined ? "-" : btc);
       document.getElementById("stxHeight").textContent = "STX: " + (stx === null || stx === undefined ? "-" : stx);
 
+      seedBlockCadenceFromState(data);
+      seedMempoolFromState(data);
+
       if (stx !== null && stx !== undefined && stx !== lastBlockHeight) {
         if (data.last_block_interval_seconds !== null && data.last_block_interval_seconds !== undefined) {
           pushHistory(blockCadenceHistory, {
@@ -813,17 +879,51 @@
         cadenceMeta.textContent = "No cadence samples yet";
       }
 
-      const mempoolAge = data.mempool_age_seconds;
-      const mempoolEventTs = (mempoolAge !== null && mempoolAge !== undefined && data.timestamp)
-        ? data.timestamp - mempoolAge
+      const recentMempool = data.recent_mempool_iterations || [];
+      const latestIteration = recentMempool.length
+        ? recentMempool[recentMempool.length - 1]
         : null;
-      if (mempoolEventTs !== null && mempoolEventTs !== undefined && mempoolEventTs !== lastMempoolEventTs) {
-        pushHistory(mempoolHistory, {
-          value: Number(data.mempool_ready_txs || 0),
-          ts: mempoolEventTs,
-          deadline: data.mempool_stop_reason === "DeadlineReached",
-        }, 160);
-        lastMempoolEventTs = mempoolEventTs;
+      if (
+        latestIteration &&
+        Number.isFinite(Number(latestIteration.ts)) &&
+        Number.isFinite(Number(latestIteration.considered_txs))
+      ) {
+        const sampleKey =
+          String(Number(latestIteration.ts)) +
+          "|" +
+          String(Number(latestIteration.considered_txs)) +
+          "|" +
+          String(latestIteration.stop_reason || "");
+        if (sampleKey !== lastMempoolSampleKey) {
+          pushHistory(
+            mempoolHistory,
+            {
+              value: Number(latestIteration.considered_txs),
+              ts: Number(latestIteration.ts),
+              deadline: latestIteration.stop_reason === "DeadlineReached",
+            },
+            160
+          );
+          lastMempoolSampleKey = sampleKey;
+          lastMempoolEventTs = Number(latestIteration.ts);
+        }
+      } else {
+        const mempoolAge = data.mempool_age_seconds;
+        const mempoolEventTs = (mempoolAge !== null && mempoolAge !== undefined && data.timestamp)
+          ? data.timestamp - mempoolAge
+          : null;
+        if (
+          mempoolEventTs !== null &&
+          mempoolEventTs !== undefined &&
+          mempoolEventTs !== lastMempoolEventTs
+        ) {
+          pushHistory(mempoolHistory, {
+            value: Number(data.mempool_ready_txs || 0),
+            ts: mempoolEventTs,
+            deadline: data.mempool_stop_reason === "DeadlineReached",
+          }, 160);
+          lastMempoolEventTs = mempoolEventTs;
+        }
       }
       renderSparkline("mempoolChart", mempoolHistory, {
         minZero: true,
