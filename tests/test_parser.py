@@ -330,6 +330,35 @@ class TestLogParser(unittest.TestCase):
         self.assertEqual(event.fields["read_cnt"], 219)
         self.assertEqual(event.fields["consensus_hash"], "6cd01af5")
 
+    def test_parse_node_validated_block_execution_costs(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 04 08:00:03 host stacks-node[1]: INFO [1770210003.802752] "
+            "[stackslib/src/net/api/postblock_proposal.rs:692] [block-proposal] "
+            "Participant: validated anchored block, "
+            "block_header_hash: c6c4f00a06d58c8049e0f14e5e75c9b6eed0c4c93d7f07151e607d7d4e62ab59, "
+            "height: 6319924, tx_count: 1, parent_stacks_block_id: 2e3ba4092ea2ddf11328ac37873bd0187a256b9f40c2ce12ea5db12f5f56ba8f, "
+            "block_size: 180, execution_cost: "
+            '{"runtime": 65074508, "write_len": 6003, "write_cnt": 102, "read_len": 620032, "read_cnt": 45}, '
+            "validation_time_ms: 46, tx_fees_microstacks: 180"
+        )
+
+        events = parser.parse_line("node", line)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.kind, "node_block_proposal")
+        self.assertEqual(
+            event.fields["block_header_hash"],
+            "c6c4f00a06d58c8049e0f14e5e75c9b6eed0c4c93d7f07151e607d7d4e62ab59",
+        )
+        self.assertEqual(event.fields["block_height"], 6319924)
+        self.assertEqual(event.fields["tx_count"], 1)
+        self.assertEqual(event.fields["runtime"], 65074508)
+        self.assertEqual(event.fields["write_len"], 6003)
+        self.assertEqual(event.fields["write_cnt"], 102)
+        self.assertEqual(event.fields["read_len"], 620032)
+        self.assertEqual(event.fields["read_cnt"], 45)
+
 
 if __name__ == "__main__":
     unittest.main()

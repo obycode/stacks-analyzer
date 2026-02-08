@@ -152,6 +152,8 @@ class Detector:
         self.confirmed_block_keys: Set[str] = set()
         self.confirmed_block_key_order: Deque[str] = deque()
         self.execution_cost_history: Deque[Dict[str, object]] = deque(maxlen=720)
+        self.pending_execution_cost_by_block_hash: Dict[str, Dict[str, object]] = {}
+        self.pending_execution_cost_order: Deque[str] = deque()
         self.signer_names: Dict[str, str] = signer_names or {}
 
         self.processed_lines: Dict[str, int] = defaultdict(int)
@@ -231,6 +233,15 @@ class Detector:
                 else None,
                 event_line=event.line,
             )
+            self._apply_confirmed_execution_cost(
+                ts=event.ts,
+                block_header_hash=event.fields.get("block_header_hash")
+                if isinstance(event.fields.get("block_header_hash"), str)
+                else None,
+                consensus_hash=event.fields.get("consensus_hash")
+                if isinstance(event.fields.get("consensus_hash"), str)
+                else None,
+            )
             self._clear_stall("node-stall", event.ts, alerts)
 
         elif event.kind == "node_nakamoto_block":
@@ -253,6 +264,30 @@ class Detector:
                 else None,
                 event_line=event.line,
             )
+
+        elif event.kind == "node_block_proposal":
+            block_header_hash = event.fields.get("block_header_hash")
+            if isinstance(block_header_hash, str) and block_header_hash:
+                costs, cost_percents = self._extract_costs_from_fields(event.fields)
+                if costs:
+                    self._remember_pending_execution_cost(
+                        block_header_hash=block_header_hash,
+                        ts=event.ts,
+                        block_height=event.fields.get("block_height")
+                        if isinstance(event.fields.get("block_height"), int)
+                        else None,
+                        tx_count=event.fields.get("tx_count")
+                        if isinstance(event.fields.get("tx_count"), int)
+                        else None,
+                        percent_full=event.fields.get("percent_full")
+                        if isinstance(event.fields.get("percent_full"), int)
+                        else None,
+                        consensus_hash=event.fields.get("consensus_hash")
+                        if isinstance(event.fields.get("consensus_hash"), str)
+                        else None,
+                        costs=costs,
+                        cost_percents=cost_percents,
+                    )
 
         elif event.kind == "node_mempool_iteration":
             considered_txs = event.fields.get("considered_txs")
@@ -284,48 +319,9 @@ class Detector:
                 )
 
         elif event.kind == "node_mined_nakamoto_block":
-            costs: Dict[str, int] = {}
-            cost_percents: Dict[str, float] = {}
-            for key, limit in EXECUTION_COST_LIMITS.items():
-                value = event.fields.get(key)
-                if not isinstance(value, int):
-                    continue
-                costs[key] = value
-                cost_percents[key] = max(
-                    0.0, min(100.0, (float(value) / float(limit)) * 100.0)
-                )
-            if costs:
-                self.last_execution_costs = costs
-                self.last_execution_costs_percent = cost_percents
-                self.last_execution_cost_ts = event.ts
-                block_height = event.fields.get("block_height")
-                tx_count = event.fields.get("tx_count")
-                percent_full = event.fields.get("percent_full")
-                consensus_hash = event.fields.get("consensus_hash")
-                self.last_execution_cost_block_height = (
-                    block_height if isinstance(block_height, int) else None
-                )
-                self.last_execution_cost_tx_count = (
-                    tx_count if isinstance(tx_count, int) else None
-                )
-                self.last_execution_cost_percent_full = (
-                    percent_full if isinstance(percent_full, int) else None
-                )
-                self.execution_cost_history.append(
-                    {
-                        "ts": event.ts,
-                        "block_height": self.last_execution_cost_block_height,
-                        "tx_count": self.last_execution_cost_tx_count,
-                        "percent_full": self.last_execution_cost_percent_full,
-                        "consensus_hash": (
-                            consensus_hash
-                            if isinstance(consensus_hash, str) and consensus_hash
-                            else None
-                        ),
-                        "costs": costs,
-                        "costs_percent": cost_percents,
-                    }
-                )
+            # Intentionally ignored for execution-cost history. These logs can be mock-miner
+            # assembly snapshots; execution costs are only recorded on confirmed tips.
+            pass
 
         elif event.kind == "node_stale_chunk":
             self.stale_chunks.append(event.ts)
@@ -1781,6 +1777,104 @@ class Detector:
                 "block_count": 1,
                 "start_ts": ts,
                 "end_ts": ts,
+            }
+        )
+
+    def _extract_costs_from_fields(
+        self, fields: Dict[str, object]
+    ) -> Tuple[Dict[str, int], Dict[str, float]]:
+        costs: Dict[str, int] = {}
+        cost_percents: Dict[str, float] = {}
+        for key, limit in EXECUTION_COST_LIMITS.items():
+            value = fields.get(key)
+            if not isinstance(value, int):
+                continue
+            costs[key] = value
+            cost_percents[key] = max(
+                0.0, min(100.0, (float(value) / float(limit)) * 100.0)
+            )
+        return costs, cost_percents
+
+    def _remember_pending_execution_cost(
+        self,
+        block_header_hash: str,
+        ts: float,
+        block_height: Optional[int],
+        tx_count: Optional[int],
+        percent_full: Optional[int],
+        consensus_hash: Optional[str],
+        costs: Dict[str, int],
+        cost_percents: Dict[str, float],
+    ) -> None:
+        self.pending_execution_cost_by_block_hash[block_header_hash] = {
+            "ts": ts,
+            "block_height": block_height,
+            "tx_count": tx_count,
+            "percent_full": percent_full,
+            "consensus_hash": consensus_hash,
+            "costs": costs,
+            "costs_percent": cost_percents,
+        }
+        self.pending_execution_cost_order.append(block_header_hash)
+        while (
+            len(self.pending_execution_cost_order)
+            > self.config.hash_height_map_size * 2
+        ):
+            oldest_hash = self.pending_execution_cost_order.popleft()
+            if oldest_hash != block_header_hash:
+                self.pending_execution_cost_by_block_hash.pop(oldest_hash, None)
+
+    def _apply_confirmed_execution_cost(
+        self,
+        ts: float,
+        block_header_hash: Optional[str],
+        consensus_hash: Optional[str],
+    ) -> None:
+        if not isinstance(block_header_hash, str) or not block_header_hash:
+            return
+        pending = self.pending_execution_cost_by_block_hash.pop(block_header_hash, None)
+        if not isinstance(pending, dict):
+            return
+        costs = pending.get("costs")
+        cost_percents = pending.get("costs_percent")
+        if not isinstance(costs, dict) or not costs:
+            return
+        if not isinstance(cost_percents, dict):
+            return
+        self.last_execution_costs = dict(costs)
+        self.last_execution_costs_percent = dict(cost_percents)
+        self.last_execution_cost_ts = ts
+        self.last_execution_cost_block_height = (
+            pending.get("block_height")
+            if isinstance(pending.get("block_height"), int)
+            else None
+        )
+        self.last_execution_cost_tx_count = (
+            pending.get("tx_count")
+            if isinstance(pending.get("tx_count"), int)
+            else None
+        )
+        self.last_execution_cost_percent_full = (
+            pending.get("percent_full")
+            if isinstance(pending.get("percent_full"), int)
+            else None
+        )
+        resolved_consensus_hash = (
+            consensus_hash
+            if isinstance(consensus_hash, str) and consensus_hash
+            else pending.get("consensus_hash")
+            if isinstance(pending.get("consensus_hash"), str)
+            else None
+        )
+        self.execution_cost_history.append(
+            {
+                "ts": ts,
+                "block_height": self.last_execution_cost_block_height,
+                "tx_count": self.last_execution_cost_tx_count,
+                "percent_full": self.last_execution_cost_percent_full,
+                "consensus_hash": resolved_consensus_hash,
+                "costs": self.last_execution_costs,
+                "costs_percent": self.last_execution_costs_percent,
             }
         )
 

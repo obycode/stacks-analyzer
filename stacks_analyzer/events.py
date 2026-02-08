@@ -37,7 +37,7 @@ SIGNER_BURN_BLOCK_EVENT_RE = re.compile(
     r"Received a new burn block event for block height\s+(?P<burn_height>\d+)"
 )
 ADVANCED_TIP_RE = re.compile(
-    r"Advanced to new tip!\s+(?P<consensus_hash>[0-9a-fA-F]+)/(?P<block_header_hash>[0-9a-fA-F]+)"
+    r"Advanced to new tip!?\s+(?P<consensus_hash>[0-9a-fA-F]+)/(?P<block_header_hash>[0-9a-fA-F]+)"
 )
 NAKAMOTO_BLOCK_RE = re.compile(
     r"Handle incoming Nakamoto block\s+(?P<consensus_hash>[0-9a-fA-F]+)/(?P<block_header_hash>[0-9a-fA-F]+)"
@@ -46,6 +46,7 @@ MEMPOOL_ITERATION_RE = re.compile(
     r"Mempool iteration finished"
 )
 EXECUTION_CONSUMED_RE = re.compile(r'execution_consumed:\s*(\{[^}]+\})')
+EXECUTION_COST_RE = re.compile(r'execution_cost:\s*(\{[^}]+\})')
 
 
 def extract_timestamp(line: str) -> float:
@@ -159,8 +160,10 @@ class LogParser:
                     )
                 )
 
-            if "Advanced to new tip!" in line:
-                tip_value = line.split("Advanced to new tip!", 1)[-1].strip()
+            if "Advanced to new tip" in line:
+                tip_value = line.split("Advanced to new tip", 1)[-1].strip()
+                if tip_value.startswith("!"):
+                    tip_value = tip_value[1:].strip()
                 tip_match = ADVANCED_TIP_RE.search(line)
                 events.append(
                     ParsedEvent(
@@ -210,6 +213,16 @@ class LogParser:
                 burn_height = extract_field(line, "burn_block_height") or extract_field(
                     line, "burn_height"
                 )
+                tx_count = extract_field(line, "tx_count")
+                execution_cost = None
+                execution_cost_match = EXECUTION_COST_RE.search(line)
+                if execution_cost_match:
+                    try:
+                        parsed_cost = json.loads(execution_cost_match.group(1))
+                        if isinstance(parsed_cost, dict):
+                            execution_cost = parsed_cost
+                    except ValueError:
+                        execution_cost = None
                 events.append(
                     ParsedEvent(
                         source=source,
@@ -221,6 +234,41 @@ class LogParser:
                             "burn_height": int(burn_height) if burn_height else None,
                             "parent_block_id": extract_field(
                                 line, "parent_stacks_block_id"
+                            ),
+                            "tx_count": (
+                                int(tx_count)
+                                if tx_count is not None
+                                else None
+                            ),
+                            "runtime": (
+                                int(execution_cost.get("runtime"))
+                                if isinstance(execution_cost, dict)
+                                and execution_cost.get("runtime") is not None
+                                else None
+                            ),
+                            "write_len": (
+                                int(execution_cost.get("write_len"))
+                                if isinstance(execution_cost, dict)
+                                and execution_cost.get("write_len") is not None
+                                else None
+                            ),
+                            "write_cnt": (
+                                int(execution_cost.get("write_cnt"))
+                                if isinstance(execution_cost, dict)
+                                and execution_cost.get("write_cnt") is not None
+                                else None
+                            ),
+                            "read_len": (
+                                int(execution_cost.get("read_len"))
+                                if isinstance(execution_cost, dict)
+                                and execution_cost.get("read_len") is not None
+                                else None
+                            ),
+                            "read_cnt": (
+                                int(execution_cost.get("read_cnt"))
+                                if isinstance(execution_cost, dict)
+                                and execution_cost.get("read_cnt") is not None
+                                else None
                             ),
                         },
                         line=line,

@@ -232,12 +232,31 @@ class TestDetector(unittest.TestCase):
             ParsedEvent(
                 source="node",
                 kind="node_mined_nakamoto_block",
+                ts=99.0,
+                fields={
+                    "block_height": 6398579,
+                    "tx_count": 9,
+                    "percent_full": 99,
+                    "consensus_hash": "ignored",
+                    "runtime": 999999,
+                    "write_len": 999,
+                    "write_cnt": 999,
+                    "read_len": 999999,
+                    "read_cnt": 999,
+                },
+            )
+        )
+        self.assertIsNone(detector.snapshot(now=99.5)["latest_execution_costs"])
+
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_block_proposal",
                 ts=100.0,
                 fields={
+                    "block_header_hash": "abc123",
                     "block_height": 6398580,
                     "tx_count": 4,
-                    "percent_full": 83,
-                    "consensus_hash": "6cd01af5",
                     "runtime": 312966534,
                     "write_len": 309422,
                     "write_cnt": 2876,
@@ -246,18 +265,30 @@ class TestDetector(unittest.TestCase):
                 },
             )
         )
+        self.assertIsNone(detector.snapshot(now=100.5)["latest_execution_costs"])
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tip_advanced",
+                ts=101.0,
+                fields={
+                    "block_header_hash": "abc123",
+                    "consensus_hash": "6cd01af5",
+                },
+            )
+        )
 
         snapshot = detector.snapshot(now=110.0)
         self.assertEqual(snapshot["latest_execution_cost_block_height"], 6398580)
         self.assertEqual(snapshot["latest_execution_cost_tx_count"], 4)
-        self.assertEqual(snapshot["latest_execution_cost_percent_full"], 83)
+        self.assertIsNone(snapshot["latest_execution_cost_percent_full"])
         self.assertAlmostEqual(
             snapshot["latest_execution_costs_percent"]["runtime"], 6.25933068, places=4
         )
         self.assertAlmostEqual(
             snapshot["latest_execution_costs_percent"]["read_len"], 83.41318, places=4
         )
-        self.assertAlmostEqual(snapshot["latest_execution_cost_age_seconds"], 10.0)
+        self.assertAlmostEqual(snapshot["latest_execution_cost_age_seconds"], 9.0)
         self.assertEqual(
             snapshot["recent_execution_costs"][0]["consensus_hash"], "6cd01af5"
         )
