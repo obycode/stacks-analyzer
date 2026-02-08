@@ -30,6 +30,9 @@ SORTITION_WINNER_REJECTED_RE = re.compile(
     r"SORTITION\((?P<burn_height>\d+)\):\s+WINNER REJECTED:\s+\"(?P<reason>[^\"]+)\",\s+"
     r"txid:\s+(?P<txid>[0-9a-fA-F]+),\s+stacks_block_hash:\s+(?P<stacks_block_hash>[0-9a-fA-F]+)"
 )
+BURNCHAIN_REORG_RE = re.compile(
+    r"Burnchain reorg detected:\s+highest common ancestor at height\s+(?P<common_ancestor_height>\d+)"
+)
 SIGNER_BURN_BLOCK_EVENT_RE = re.compile(
     r"Received a new burn block event for block height\s+(?P<burn_height>\d+)"
 )
@@ -100,6 +103,7 @@ class LogParser:
                             "block_height": int(block_height) if block_height else None,
                             "tx_count": int(tx_count) if tx_count else None,
                             "percent_full": int(percent_full) if percent_full else None,
+                            "consensus_hash": extract_field(line, "consensus_hash"),
                             "runtime": (
                                 int(execution_consumed.get("runtime"))
                                 if isinstance(execution_consumed, dict)
@@ -398,6 +402,24 @@ class LogParser:
                         )
                     )
 
+            if "Burnchain reorg detected:" in line:
+                reorg_match = BURNCHAIN_REORG_RE.search(line)
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_burnchain_reorg",
+                        ts=ts,
+                        fields={
+                            "common_ancestor_height": (
+                                int(reorg_match.group("common_ancestor_height"))
+                                if reorg_match
+                                else None
+                            ),
+                        },
+                        line=line,
+                    )
+                )
+
             if "including block_commit_op (winning) -" in line:
                 winning_match = WINNING_BLOCK_COMMIT_RE.search(line)
                 if winning_match:
@@ -662,6 +684,7 @@ class LogParser:
                             "signer_signature_hash": signature_hash,
                             "block_height": int(block_height) if block_height else None,
                             "block_id": extract_field(line, "block_id"),
+                            "consensus_hash": extract_field(line, "consensus_hash"),
                         },
                         line=line,
                     )
@@ -679,6 +702,7 @@ class LogParser:
                             "signer_signature_hash": signature_hash,
                             "block_height": int(block_height) if block_height else None,
                             "block_id": extract_field(line, "block_id"),
+                            "consensus_hash": extract_field(line, "consensus_hash"),
                         },
                         line=line,
                     )

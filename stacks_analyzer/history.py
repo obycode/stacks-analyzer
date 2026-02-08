@@ -380,6 +380,7 @@ def should_store_event(kind: str, fields: Dict[str, Any]) -> bool:
         "node_sortition_winner_selected",
         "node_sortition_winner_rejected",
         "node_consensus",
+        "node_burnchain_reorg",
         "node_winning_block_commit",
         "signer_state_machine_update",
         "signer_block_proposal",

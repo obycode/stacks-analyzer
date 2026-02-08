@@ -32,7 +32,7 @@ class TestLogParser(unittest.TestCase):
             "[stacks-signer/src/v0/signer.rs:571] "
             "Received a new block event. "
             "block_id: 1111222233334444, block_height: 6319925, "
-            "signer_signature_hash: aabbccddeeff00112233"
+            "signer_signature_hash: aabbccddeeff00112233, consensus_hash: feedbeef"
         )
 
         events = parser.parse_line("signer", line)
@@ -44,6 +44,41 @@ class TestLogParser(unittest.TestCase):
         self.assertEqual(
             event.fields["signer_signature_hash"], "aabbccddeeff00112233"
         )
+        self.assertEqual(event.fields["consensus_hash"], "feedbeef")
+
+    def test_parse_node_tip_without_exclamation(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 07 13:20:25 host stacks-node[1]: INFO [1770488425.103811] "
+            "[stackslib/src/chainstate/nakamoto/mod.rs:2160] "
+            "Advanced to new tip 6cd01af58983661e71c4e6671ff2f2c3982cb24b/"
+            "7883e84791d26307031a9c1270006a1edb02f4d6d7159cc280662bca0d012418"
+        )
+
+        events = parser.parse_line("node", line)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.kind, "node_tip_advanced")
+        self.assertEqual(
+            event.fields["consensus_hash"], "6cd01af58983661e71c4e6671ff2f2c3982cb24b"
+        )
+        self.assertEqual(
+            event.fields["block_header_hash"],
+            "7883e84791d26307031a9c1270006a1edb02f4d6d7159cc280662bca0d012418",
+        )
+
+    def test_parse_burnchain_reorg_event(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 07 20:05:45 host stacks-node[1]: WARN [1770512745.659057] "
+            "[stackslib/src/burnchains/burnchain.rs:1146] "
+            "Burnchain reorg detected: highest common ancestor at height 935496"
+        )
+
+        events = parser.parse_line("node", line)
+        reorg_events = [event for event in events if event.kind == "node_burnchain_reorg"]
+        self.assertEqual(len(reorg_events), 1)
+        self.assertEqual(reorg_events[0].fields["common_ancestor_height"], 935496)
 
     def test_parse_signer_block_rejection(self) -> None:
         parser = LogParser()
@@ -293,6 +328,7 @@ class TestLogParser(unittest.TestCase):
         self.assertEqual(event.fields["write_cnt"], 2876)
         self.assertEqual(event.fields["read_len"], 83413180)
         self.assertEqual(event.fields["read_cnt"], 219)
+        self.assertEqual(event.fields["consensus_hash"], "6cd01af5")
 
 
 if __name__ == "__main__":

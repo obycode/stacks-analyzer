@@ -237,6 +237,7 @@ class TestDetector(unittest.TestCase):
                     "block_height": 6398580,
                     "tx_count": 4,
                     "percent_full": 83,
+                    "consensus_hash": "6cd01af5",
                     "runtime": 312966534,
                     "write_len": 309422,
                     "write_cnt": 2876,
@@ -257,6 +258,9 @@ class TestDetector(unittest.TestCase):
             snapshot["latest_execution_costs_percent"]["read_len"], 83.41318, places=4
         )
         self.assertAlmostEqual(snapshot["latest_execution_cost_age_seconds"], 10.0)
+        self.assertEqual(
+            snapshot["recent_execution_costs"][0]["consensus_hash"], "6cd01af5"
+        )
 
     def test_boundary_timeout_emits_warning(self) -> None:
         detector = Detector(
@@ -431,6 +435,26 @@ class TestDetector(unittest.TestCase):
         keys = {alert.key for alert in alerts}
         self.assertIn("sortition-parent-burn-mismatch-105", keys)
 
+    def test_burnchain_reorg_emits_warning_alert(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        alerts = detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_burnchain_reorg",
+                ts=100.0,
+                fields={"common_ancestor_height": 935496},
+            )
+        )
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].key, "burnchain-reorg-935496")
+        self.assertEqual(alerts[0].severity, "warning")
+        self.assertIn("highest common ancestor at height 935496", alerts[0].message)
+
     def test_new_block_event_closes_proposal_and_updates_heights(self) -> None:
         detector = Detector(
             DetectorConfig(
@@ -488,6 +512,217 @@ class TestDetector(unittest.TestCase):
         alerts, _ = detector.tick(now=120.0)
         keys = {alert.key for alert in alerts}
         self.assertNotIn("proposal-timeout-%s" % signature_hash, keys)
+
+    def test_confirmed_block_history_uses_node_tip_and_dedupes_signer_push(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tip_advanced",
+                ts=100.0,
+                fields={
+                    "consensus_hash": "aa11",
+                    "block_header_hash": "bb22",
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_new_block_event",
+                ts=101.0,
+                fields={
+                    "block_id": "cc33",
+                    "block_height": 6319926,
+                    "consensus_hash": "aa11",
+                    "signer_signature_hash": "sig1",
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_pushed",
+                ts=102.0,
+                fields={
+                    "block_id": "cc33",
+                    "block_height": 6319926,
+                    "signer_signature_hash": "sig1",
+                },
+            )
+        )
+
+        snapshot = detector.snapshot(now=103.0)
+        recent_confirmed = snapshot["recent_confirmed_blocks"]
+        self.assertEqual(len(recent_confirmed), 2)
+        self.assertEqual(recent_confirmed[0]["source"], "node_tip_advanced")
+        self.assertEqual(recent_confirmed[0]["consensus_hash"], "aa11")
+        self.assertEqual(recent_confirmed[1]["source"], "signer_new_block_event")
+        self.assertEqual(recent_confirmed[1]["block_id"], "cc33")
+        self.assertEqual(
+            snapshot["recent_confirmed_blocks_capacity"], detector.confirmed_block_history.maxlen
+        )
+
+    def test_signer_block_events_fallback_to_current_consensus_for_history(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tip_advanced",
+                ts=100.0,
+                fields={
+                    "consensus_hash": "aa11",
+                    "block_header_hash": "bb22",
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_new_block_event",
+                ts=101.0,
+                fields={
+                    "block_id": "cc33",
+                    "block_height": 6319926,
+                    "signer_signature_hash": "sig1",
+                },
+            )
+        )
+
+        snapshot = detector.snapshot(now=102.0)
+        recent_confirmed = snapshot["recent_confirmed_blocks"]
+        self.assertEqual(len(recent_confirmed), 2)
+        self.assertEqual(recent_confirmed[1]["source"], "signer_new_block_event")
+        self.assertEqual(recent_confirmed[1]["consensus_hash"], "aa11")
+
+    def test_node_nakamoto_block_records_confirmed_history(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_nakamoto_block",
+                ts=100.0,
+                fields={
+                    "consensus_hash": "aa11",
+                    "block_header_hash": "bb22",
+                    "block_id": "cc33",
+                },
+            )
+        )
+        snapshot = detector.snapshot(now=101.0)
+        recent_confirmed = snapshot["recent_confirmed_blocks"]
+        self.assertEqual(len(recent_confirmed), 1)
+        self.assertEqual(recent_confirmed[0]["source"], "node_nakamoto_block")
+        self.assertEqual(recent_confirmed[0]["consensus_hash"], "aa11")
+        self.assertEqual(recent_confirmed[0]["block_header_hash"], "bb22")
+
+    def test_confirmed_block_fallback_key_uses_line_hash_when_ids_missing(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tip_advanced",
+                ts=100.0,
+                fields={},
+                line="Advanced to new tip aaa/bbb",
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tip_advanced",
+                ts=100.0,
+                fields={},
+                line="Advanced to new tip ccc/ddd",
+            )
+        )
+
+        snapshot = detector.snapshot(now=101.0)
+        recent_confirmed = snapshot["recent_confirmed_blocks"]
+        self.assertEqual(len(recent_confirmed), 2)
+
+    def test_tenure_block_counts_increment_on_node_tips(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tip_advanced",
+                ts=100.0,
+                fields={"consensus_hash": "aa11"},
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tip_advanced",
+                ts=101.0,
+                fields={"consensus_hash": "aa11"},
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tip_advanced",
+                ts=102.0,
+                fields={"consensus_hash": "bb22"},
+            )
+        )
+
+        snapshot = detector.snapshot(now=103.0)
+        counts = snapshot["recent_tenure_block_counts"]
+        self.assertEqual(len(counts), 2)
+        self.assertEqual(counts[0]["consensus_hash"], "aa11")
+        self.assertEqual(counts[0]["block_count"], 2)
+        self.assertEqual(counts[1]["consensus_hash"], "bb22")
+        self.assertEqual(counts[1]["block_count"], 1)
+
+    def test_tenure_block_counts_keeps_last_eight(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        for idx in range(10):
+            detector.process_event(
+                ParsedEvent(
+                    source="node",
+                    kind="node_tip_advanced",
+                    ts=100.0 + idx,
+                    fields={"consensus_hash": "hash%02d" % idx},
+                )
+            )
+
+        snapshot = detector.snapshot(now=200.0)
+        counts = snapshot["recent_tenure_block_counts"]
+        self.assertEqual(len(counts), 8)
+        self.assertEqual(counts[0]["consensus_hash"], "hash02")
+        self.assertEqual(counts[-1]["consensus_hash"], "hash09")
 
     def test_signer_names_appear_in_alerts_and_snapshot(self) -> None:
         pubkey = "02abc"
@@ -592,6 +827,31 @@ class TestDetector(unittest.TestCase):
         self.assertEqual(snapshot["current_consensus_burn_height"], 934989)
         self.assertEqual(snapshot["current_miner_apparent_sender"], "bc1qmineraddress")
         self.assertEqual(snapshot["current_miner_pubkey"], "0277minerpubkey")
+
+    def test_tenure_change_history_includes_non_extend_changes(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tenure_change",
+                ts=100.0,
+                fields={
+                    "tenure_change_kind": "BlockFound",
+                    "txid": "aa" * 32,
+                    "block_height": 123,
+                    "burn_height": 456,
+                },
+            )
+        )
+        snapshot = detector.snapshot(now=101.0)
+        self.assertEqual(len(snapshot["tenure_change_history"]), 1)
+        self.assertEqual(snapshot["tenure_change_history"][0]["kind"], "BlockFound")
+        self.assertEqual(len(snapshot["recent_tenure_extends"]), 0)
 
     def test_sortition_rounds_and_active_miner_snapshot(self) -> None:
         detector = Detector(

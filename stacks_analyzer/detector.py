@@ -1,4 +1,5 @@
 import statistics
+import hashlib
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -145,7 +146,12 @@ class Detector:
         self.tenure_extend_history: Deque[Dict[str, object]] = deque(
             maxlen=self.config.tenure_extend_history_size
         )
-        self.execution_cost_history: Deque[Dict[str, object]] = deque(maxlen=120)
+        self.tenure_change_history: Deque[Dict[str, object]] = deque(maxlen=512)
+        self.tenure_block_counts: Deque[Dict[str, object]] = deque(maxlen=8)
+        self.confirmed_block_history: Deque[Dict[str, object]] = deque(maxlen=4096)
+        self.confirmed_block_keys: Set[str] = set()
+        self.confirmed_block_key_order: Deque[str] = deque()
+        self.execution_cost_history: Deque[Dict[str, object]] = deque(maxlen=720)
         self.signer_names: Dict[str, str] = signer_names or {}
 
         self.processed_lines: Dict[str, int] = defaultdict(int)
@@ -203,7 +209,50 @@ class Detector:
                     self.block_interval_total_seconds += interval_seconds
                     self.block_interval_samples += 1
             self.last_node_tip_ts = event.ts
+            self._record_tenure_block_count(
+                consensus_hash=event.fields.get("consensus_hash")
+                if isinstance(event.fields.get("consensus_hash"), str)
+                else None,
+                ts=event.ts,
+            )
+            self._record_confirmed_block_event(
+                ts=event.ts,
+                source="node_tip_advanced",
+                consensus_hash=event.fields.get("consensus_hash")
+                if isinstance(event.fields.get("consensus_hash"), str)
+                else None,
+                block_height=(
+                    self.current_stacks_block_height
+                    if isinstance(self.current_stacks_block_height, int)
+                    else None
+                ),
+                block_header_hash=event.fields.get("block_header_hash")
+                if isinstance(event.fields.get("block_header_hash"), str)
+                else None,
+                event_line=event.line,
+            )
             self._clear_stall("node-stall", event.ts, alerts)
+
+        elif event.kind == "node_nakamoto_block":
+            self._record_confirmed_block_event(
+                ts=event.ts,
+                source="node_nakamoto_block",
+                consensus_hash=event.fields.get("consensus_hash")
+                if isinstance(event.fields.get("consensus_hash"), str)
+                else None,
+                block_height=(
+                    self.current_stacks_block_height
+                    if isinstance(self.current_stacks_block_height, int)
+                    else None
+                ),
+                block_header_hash=event.fields.get("block_header_hash")
+                if isinstance(event.fields.get("block_header_hash"), str)
+                else None,
+                block_id=event.fields.get("block_id")
+                if isinstance(event.fields.get("block_id"), str)
+                else None,
+                event_line=event.line,
+            )
 
         elif event.kind == "node_mempool_iteration":
             considered_txs = event.fields.get("considered_txs")
@@ -252,6 +301,7 @@ class Detector:
                 block_height = event.fields.get("block_height")
                 tx_count = event.fields.get("tx_count")
                 percent_full = event.fields.get("percent_full")
+                consensus_hash = event.fields.get("consensus_hash")
                 self.last_execution_cost_block_height = (
                     block_height if isinstance(block_height, int) else None
                 )
@@ -267,6 +317,11 @@ class Detector:
                         "block_height": self.last_execution_cost_block_height,
                         "tx_count": self.last_execution_cost_tx_count,
                         "percent_full": self.last_execution_cost_percent_full,
+                        "consensus_hash": (
+                            consensus_hash
+                            if isinstance(consensus_hash, str) and consensus_hash
+                            else None
+                        ),
                         "costs": costs,
                         "costs_percent": cost_percents,
                     }
@@ -419,6 +474,23 @@ class Detector:
                         ts=event.ts,
                     )
 
+        elif event.kind == "node_burnchain_reorg":
+            common_ancestor_height = event.fields.get("common_ancestor_height")
+            if isinstance(common_ancestor_height, int):
+                message = (
+                    "Burnchain reorg detected: highest common ancestor at height %d"
+                    % common_ancestor_height
+                )
+                if isinstance(self.current_bitcoin_block_height, int):
+                    message += " | current_burn_height=%d" % self.current_bitcoin_block_height
+                self._emit_alert(
+                    alerts=alerts,
+                    key="burnchain-reorg-%d" % common_ancestor_height,
+                    severity="warning",
+                    message=message,
+                    ts=event.ts,
+                )
+
         elif event.kind == "node_winning_block_commit":
             apparent_sender = event.fields.get("apparent_sender")
             if isinstance(apparent_sender, str) and apparent_sender:
@@ -433,21 +505,30 @@ class Detector:
 
         elif event.kind == "node_tenure_change":
             tenure_change_kind = event.fields.get("tenure_change_kind")
+            txid = event.fields.get("txid")
+            origin = event.fields.get("origin")
+            block_height = event.fields.get("block_height")
+            if not isinstance(block_height, int):
+                block_height = self.current_stacks_block_height
+            burn_height = event.fields.get("burn_height")
+            if not isinstance(burn_height, int):
+                burn_height = self.current_bitcoin_block_height
+            if isinstance(tenure_change_kind, str):
+                self.tenure_change_history.append(
+                    {
+                        "ts": event.ts,
+                        "kind": tenure_change_kind,
+                        "txid": txid if isinstance(txid, str) else None,
+                        "origin": origin if isinstance(origin, str) else None,
+                        "block_height": block_height,
+                        "burn_height": burn_height,
+                    }
+                )
             if isinstance(tenure_change_kind, str) and "extend" in tenure_change_kind.lower():
                 self.last_tenure_extend_kind = tenure_change_kind
-                txid = event.fields.get("txid")
                 self.last_tenure_extend_txid = txid if isinstance(txid, str) else None
-                origin = event.fields.get("origin")
-                self.last_tenure_extend_origin = (
-                    origin if isinstance(origin, str) else None
-                )
+                self.last_tenure_extend_origin = origin if isinstance(origin, str) else None
                 self.last_tenure_extend_ts = event.ts
-                block_height = event.fields.get("block_height")
-                if not isinstance(block_height, int):
-                    block_height = self.current_stacks_block_height
-                burn_height = event.fields.get("burn_height")
-                if not isinstance(burn_height, int):
-                    burn_height = self.current_bitcoin_block_height
                 self.tenure_extend_history.append(
                     {
                         "ts": event.ts,
@@ -701,8 +782,36 @@ class Detector:
                 state = self.proposals.setdefault(signature_hash, ProposalState(event.ts))
                 state.pushed_ts = event.ts
                 block_height = event.fields.get("block_height")
+                block_id = event.fields.get("block_id")
+                consensus_hash = event.fields.get("consensus_hash")
                 if block_height is not None:
                     state.block_height = block_height
+                if not isinstance(consensus_hash, str) or not consensus_hash:
+                    if isinstance(block_id, str) and block_id:
+                        mapped_consensus = self.block_header_to_consensus.get(block_id)
+                        if isinstance(mapped_consensus, str) and mapped_consensus:
+                            consensus_hash = mapped_consensus
+                if (not isinstance(consensus_hash, str) or not consensus_hash) and isinstance(
+                    self.current_consensus_hash, str
+                ):
+                    consensus_hash = self.current_consensus_hash
+                if isinstance(consensus_hash, str) and consensus_hash:
+                    self._record_confirmed_block_event(
+                        ts=event.ts,
+                        source="signer_block_pushed",
+                        consensus_hash=consensus_hash,
+                        block_height=(
+                            block_height
+                            if isinstance(block_height, int)
+                            else (
+                                self.current_stacks_block_height
+                                if isinstance(self.current_stacks_block_height, int)
+                                else None
+                            )
+                        ),
+                        block_id=block_id if isinstance(block_id, str) else None,
+                        event_line=event.line,
+                    )
                 alerts.extend(self._finalize_proposal(signature_hash, event.ts))
 
         elif event.kind == "signer_new_block_event":
@@ -712,8 +821,30 @@ class Detector:
                     return alerts
                 state = self.proposals.setdefault(signature_hash, ProposalState(event.ts))
                 block_height = event.fields.get("block_height")
+                block_id = event.fields.get("block_id")
+                consensus_hash = event.fields.get("consensus_hash")
                 if block_height is not None:
                     state.block_height = block_height
+                if (not isinstance(consensus_hash, str) or not consensus_hash) and isinstance(
+                    self.current_consensus_hash, str
+                ):
+                    consensus_hash = self.current_consensus_hash
+                self._record_confirmed_block_event(
+                    ts=event.ts,
+                    source="signer_new_block_event",
+                    consensus_hash=consensus_hash if isinstance(consensus_hash, str) else None,
+                    block_height=(
+                        block_height
+                        if isinstance(block_height, int)
+                        else (
+                            self.current_stacks_block_height
+                            if isinstance(self.current_stacks_block_height, int)
+                            else None
+                        )
+                    ),
+                    block_id=block_id if isinstance(block_id, str) else None,
+                    event_line=event.line,
+                )
                 alerts.extend(self._finalize_proposal(signature_hash, event.ts))
 
         elif event.kind == "signer_block_response":
@@ -1557,6 +1688,101 @@ class Detector:
         block_id = event.fields.get("block_id")
         if isinstance(block_id, str) and block_id and isinstance(burn_height, int):
             self._remember_block_hash_burn(block_id, burn_height)
+        if (
+            isinstance(block_id, str)
+            and block_id
+            and isinstance(consensus_hash, str)
+            and consensus_hash
+        ):
+            self._remember_block_header_consensus(block_id, consensus_hash)
+
+    def _record_confirmed_block_event(
+        self,
+        ts: float,
+        source: str,
+        consensus_hash: Optional[str] = None,
+        block_height: Optional[int] = None,
+        block_id: Optional[str] = None,
+        block_header_hash: Optional[str] = None,
+        event_line: Optional[str] = None,
+    ) -> None:
+        key: str
+        if isinstance(block_header_hash, str) and block_header_hash:
+            key = "header:%s" % block_header_hash
+        elif isinstance(block_id, str) and block_id:
+            key = "id:%s" % block_id
+        elif (
+            isinstance(consensus_hash, str)
+            and consensus_hash
+            and isinstance(block_height, int)
+        ):
+            key = "tenure-height:%s:%d" % (consensus_hash, block_height)
+        elif isinstance(event_line, str) and event_line:
+            line_hash = hashlib.sha1(event_line.encode("utf-8")).hexdigest()[:20]
+            key = "line:%s:%s" % (source, line_hash)
+        else:
+            key = "source-ts:%s:%0.9f" % (source, ts)
+
+        if key in self.confirmed_block_keys:
+            return
+
+        self.confirmed_block_keys.add(key)
+        self.confirmed_block_key_order.append(key)
+        while len(self.confirmed_block_key_order) > 16384:
+            oldest = self.confirmed_block_key_order.popleft()
+            self.confirmed_block_keys.discard(oldest)
+
+        self.confirmed_block_history.append(
+            {
+                "ts": ts,
+                "source": source,
+                "consensus_hash": (
+                    consensus_hash
+                    if isinstance(consensus_hash, str) and consensus_hash
+                    else None
+                ),
+                "block_height": block_height if isinstance(block_height, int) else None,
+                "block_id": block_id if isinstance(block_id, str) and block_id else None,
+                "block_header_hash": (
+                    block_header_hash
+                    if isinstance(block_header_hash, str) and block_header_hash
+                    else None
+                ),
+            }
+        )
+
+    def _record_tenure_block_count(
+        self, consensus_hash: Optional[str], ts: float
+    ) -> None:
+        normalized_hash = (
+            consensus_hash if isinstance(consensus_hash, str) and consensus_hash else None
+        )
+        if normalized_hash is None and isinstance(self.current_consensus_hash, str):
+            normalized_hash = self.current_consensus_hash
+        if not isinstance(normalized_hash, str) or not normalized_hash:
+            return
+
+        if (
+            self.tenure_block_counts
+            and self.tenure_block_counts[-1].get("consensus_hash") == normalized_hash
+        ):
+            current = self.tenure_block_counts[-1]
+            current_count = current.get("block_count")
+            if isinstance(current_count, int):
+                current["block_count"] = current_count + 1
+            else:
+                current["block_count"] = 1
+            current["end_ts"] = ts
+            return
+
+        self.tenure_block_counts.append(
+            {
+                "consensus_hash": normalized_hash,
+                "block_count": 1,
+                "start_ts": ts,
+                "end_ts": ts,
+            }
+        )
 
     def snapshot(self, now: Optional[float] = None) -> Dict[str, object]:
         ts = now if now is not None else time.time()
@@ -1750,6 +1976,8 @@ class Detector:
 
         recent_tenure_extends = list(self.tenure_extend_history)[-5:]
         recent_tenure_extends.reverse()
+        tenure_extend_history = list(self.tenure_extend_history)
+        tenure_change_history = list(self.tenure_change_history)
         avg_block_interval_seconds: Optional[float] = None
         if self.block_interval_samples > 0:
             avg_block_interval_seconds = (
@@ -1819,6 +2047,11 @@ class Detector:
                 else max(0.0, ts - self.last_tenure_extend_ts)
             ),
             "recent_tenure_extends": recent_tenure_extends,
+            "tenure_extend_history": tenure_extend_history,
+            "tenure_change_history": tenure_change_history,
+            "recent_tenure_block_counts": list(self.tenure_block_counts),
+            "recent_confirmed_blocks": list(self.confirmed_block_history),
+            "recent_confirmed_blocks_capacity": self.confirmed_block_history.maxlen,
             "node_tip_age_seconds": (
                 None if self.last_node_tip_ts is None else max(0.0, ts - self.last_node_tip_ts)
             ),

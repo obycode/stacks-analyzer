@@ -101,16 +101,23 @@
       margin-right: 4px;
       vertical-align: middle;
     }
-    .outcome-strip {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
+    .legend-line {
+      display: inline-block;
+      width: 14px;
+      height: 0;
+      border-top: 2px dashed currentColor;
+      margin-right: 4px;
+      vertical-align: middle;
+      transform: translateY(-1px);
     }
-    .outcome-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 999px;
-      border: 1px solid rgba(148, 163, 184, 0.4);
+    .legend-line-solid {
+      border-top-style: solid;
+    }
+    .legend-line-dotted {
+      border-top-style: dotted;
+    }
+    #tenureBlocksChart {
+      height: 110px;
     }
     .outcome-approved { background: rgba(34, 197, 94, 0.8); }
     .outcome-rejected { background: rgba(239, 68, 68, 0.8); }

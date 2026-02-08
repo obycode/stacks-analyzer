@@ -14,6 +14,15 @@
         .replaceAll(">", "&gt;");
     }
 
+    function escapeAttr(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("\"", "&quot;")
+        .replaceAll("'", "&#39;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
     function fmtWallClock(ts) {
       if (ts === null || ts === undefined) return "-";
       return new Date(ts * 1000).toLocaleString();
@@ -120,6 +129,13 @@
     const mempoolHistory = [];
     let lastBlockHeight = null;
     let lastMempoolEventTs = null;
+    const COST_DIMENSIONS = [
+      { key: "runtime", label: "Runtime", color: "#f59e0b" },
+      { key: "write_len", label: "Write Len", color: "#22d3ee" },
+      { key: "write_cnt", label: "Write Cnt", color: "#a78bfa" },
+      { key: "read_len", label: "Read Len", color: "#34d399" },
+      { key: "read_cnt", label: "Read Cnt", color: "#fb7185" },
+    ];
 
     function pushHistory(list, item, maxLen) {
       list.push(item);
@@ -223,6 +239,284 @@
         "<path d='" + area + "' fill='rgba(56, 189, 248, 0.08)' />" +
         "<path d='" + line + "' fill='none' stroke='rgba(56, 189, 248, 0.9)' stroke-width='1.0' />" +
         markers;
+    }
+
+    function tenureChangeStyle(kind) {
+      const text = String(kind || "").toLowerCase();
+      if (text.includes("extendread")) {
+        return { color: "#c4b5fd", dash: "3 2", label: "ExtendReadCount" };
+      }
+      if (text.includes("extendall")) {
+        return { color: "#fde68a", dash: "3 2", label: "ExtendAll" };
+      }
+      if (text.includes("blockfound")) {
+        return { color: "#f97316", dash: "", label: "BlockFound" };
+      }
+      return { color: "#94a3b8", dash: "1 2", label: String(kind || "TenureChange") };
+    }
+
+    function renderExecutionCostTrend(svgId, samples, tenureChanges) {
+      const svg = document.getElementById(svgId);
+      if (!svg) return;
+      if (!samples.length) {
+        svg.innerHTML = "";
+        return;
+      }
+      const rect = svg.getBoundingClientRect();
+      const width = Math.max(180, Math.round(rect.width || svg.clientWidth || 0));
+      const height = Math.max(48, Math.round(rect.height || svg.clientHeight || 0));
+      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+      svg.setAttribute("preserveAspectRatio", "xMinYMin meet");
+
+      const topPad = 8;
+      const rightPad = 8;
+      const bottomPad = 16;
+      const leftPad = 26;
+      const plotWidth = width - leftPad - rightPad;
+      const plotHeight = height - topPad - bottomPad;
+
+      const yForPct = (pct) =>
+        height - bottomPad - (Math.max(0, Math.min(100, Number(pct) || 0)) / 100) * plotHeight;
+      const xForIdx = (idx, count) =>
+        leftPad + (idx / Math.max(1, count - 1)) * plotWidth;
+
+      const firstTs = Number(samples[0] && samples[0].ts);
+      const lastTs = Number(samples[samples.length - 1] && samples[samples.length - 1].ts);
+      const windowSeconds =
+        Number.isFinite(firstTs) && Number.isFinite(lastTs) ? Math.max(0, lastTs - firstTs) : null;
+      const xLeft = windowSeconds === null ? "" : "-" + formatWindowTick(windowSeconds);
+
+      let changeMarkers = "";
+      const hasWindow = Number.isFinite(firstTs) && Number.isFinite(lastTs) && lastTs > firstTs;
+      if (Array.isArray(tenureChanges) && hasWindow) {
+        const orderedChanges = tenureChanges
+          .filter((item) => Number.isFinite(Number(item && item.ts)))
+          .slice()
+          .sort((a, b) => Number(a.ts) - Number(b.ts));
+        const seenXs = new Set();
+        changeMarkers = orderedChanges
+          .map((item) => {
+            const ts = Number(item.ts);
+            if (ts < firstTs || ts > lastTs) return "";
+            const ratio = (ts - firstTs) / (lastTs - firstTs);
+            const x = leftPad + ratio * plotWidth;
+            const xKey = Math.round(x);
+            if (seenXs.has(xKey)) return "";
+            seenXs.add(xKey);
+            const kind = String(item.kind || "unknown");
+            const style = tenureChangeStyle(kind);
+            const title = "Tenure change: " + style.label + " at " + fmtWallClock(ts);
+            const dashAttr = style.dash ? " stroke-dasharray='" + style.dash + "'" : "";
+            return (
+              "<line x1='" +
+              x.toFixed(2) +
+              "' x2='" +
+              x.toFixed(2) +
+              "' y1='" +
+              yForPct(100).toFixed(2) +
+              "' y2='" +
+              yForPct(0).toFixed(2) +
+              "' stroke='" +
+              style.color +
+              "' stroke-width='1.0'" +
+              dashAttr +
+              " opacity='0.9'><title>" +
+              escapeHtml(title) +
+              "</title></line>"
+            );
+          })
+          .join("");
+      }
+
+      const grid =
+        "<line x1='" + leftPad + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForPct(100) + "' y2='" + yForPct(100) + "' stroke='rgba(148, 163, 184, 0.2)' stroke-width='0.6' />" +
+        "<line x1='" + leftPad + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForPct(50) + "' y2='" + yForPct(50) + "' stroke='rgba(148, 163, 184, 0.16)' stroke-width='0.6' />" +
+        "<line x1='" + leftPad + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForPct(0) + "' y2='" + yForPct(0) + "' stroke='rgba(148, 163, 184, 0.2)' stroke-width='0.6' />" +
+        "<line x1='" + leftPad + "' x2='" + leftPad + "' y1='" + yForPct(100) + "' y2='" + yForPct(0) + "' stroke='rgba(148, 163, 184, 0.24)' stroke-width='0.6' />" +
+        "<text class='chart-axis' x='3' y='" + (yForPct(100) + 3) + "' fill='#94a3b8'>100%</text>" +
+        "<text class='chart-axis' x='7' y='" + (yForPct(50) + 3) + "' fill='#94a3b8'>50%</text>" +
+        "<text class='chart-axis' x='10' y='" + (yForPct(0) + 3) + "' fill='#94a3b8'>0%</text>" +
+        (xLeft ? "<text class='chart-axis' x='" + leftPad + "' y='" + (height - 2) + "' fill='#94a3b8'>" + xLeft + "</text>" : "") +
+        "<text class='chart-axis' x='" + (leftPad + plotWidth) + "' y='" + (height - 2) + "' text-anchor='end' fill='#94a3b8'>now</text>";
+
+      const lines = COST_DIMENSIONS.map((dim) => {
+        const points = samples.map((sample, idx) => {
+          const costs = sample.costs_percent || {};
+          const pct = costs[dim.key];
+          return [xForIdx(idx, samples.length), yForPct(pct)];
+        });
+        const path = points
+          .map((pt, idx) => (idx === 0 ? "M" : "L") + pt[0].toFixed(2) + " " + pt[1].toFixed(2))
+          .join(" ");
+        const last = points[points.length - 1];
+        return (
+          "<path d='" +
+          path +
+          "' fill='none' stroke='" +
+          dim.color +
+          "' stroke-width='1.2' opacity='0.95' />" +
+          "<circle cx='" +
+          last[0].toFixed(2) +
+          "' cy='" +
+          last[1].toFixed(2) +
+          "' r='1.7' fill='" +
+          dim.color +
+          "' />"
+        );
+      }).join("");
+
+      svg.innerHTML = grid + changeMarkers + lines;
+    }
+
+    function renderTenureBlocksChart(svgId, tenuresRaw, tenureChanges) {
+      const svg = document.getElementById(svgId);
+      if (!svg) return;
+      if (!Array.isArray(tenuresRaw) || !tenuresRaw.length) {
+        svg.innerHTML = "";
+        return;
+      }
+
+      const orderedTenures = tenuresRaw
+        .slice()
+        .filter((item) => {
+          if (!item || typeof item !== "object") return false;
+          const count = Number(item.block_count);
+          return Number.isFinite(count) && count > 0;
+        })
+        .sort((a, b) => Number(a.start_ts || 0) - Number(b.start_ts || 0));
+      if (!orderedTenures.length) {
+        svg.innerHTML = "";
+        return;
+      }
+
+      const windowTenures = orderedTenures.slice(-8);
+      if (!windowTenures.length) {
+        svg.innerHTML = "";
+        return;
+      }
+
+      const changeEvents = (tenureChanges || [])
+        .slice()
+        .filter((item) => Number.isFinite(Number(item && item.ts)))
+        .sort((a, b) => Number(a.ts) - Number(b.ts));
+
+      for (const tenure of windowTenures) {
+        const markers = [];
+        const startTs = Number(tenure.start_ts || 0);
+        const endTs = Number(tenure.end_ts || startTs);
+        for (const change of changeEvents) {
+          const ts = Number(change.ts);
+          if (ts < startTs || ts > endTs) continue;
+          let ratio = 0.5;
+          if (Number.isFinite(startTs) && Number.isFinite(endTs) && endTs > startTs) {
+            ratio = (ts - startTs) / (endTs - startTs);
+          }
+          ratio = Math.max(0, Math.min(1, ratio));
+          markers.push({
+            kind: String(change.kind || "unknown"),
+            ts,
+            ratio,
+          });
+        }
+        tenure.markers = markers;
+      }
+
+      const rect = svg.getBoundingClientRect();
+      const width = Math.max(180, Math.round(rect.width || svg.clientWidth || 0));
+      const height = Math.max(64, Math.round(rect.height || svg.clientHeight || 0));
+      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+      svg.setAttribute("preserveAspectRatio", "xMinYMin meet");
+
+      const topPad = 8;
+      const rightPad = 8;
+      const bottomPad = 16;
+      const leftPad = 26;
+      const plotWidth = width - leftPad - rightPad;
+      const plotHeight = height - topPad - bottomPad;
+
+      const tenureCount = windowTenures.length;
+      const maxTotal = Math.max(1, ...windowTenures.map((item) => Number(item.block_count) || 0));
+      const yForCount = (count) => height - bottomPad - (Math.max(0, Number(count) || 0) / maxTotal) * plotHeight;
+      const slotWidth = plotWidth / Math.max(1, tenureCount);
+      const barWidth = Math.max(10, slotWidth - 8);
+
+      const bars = windowTenures
+        .map((tenure, idx) => {
+          const x = leftPad + idx * slotWidth + (slotWidth - barWidth) / 2;
+          const yTop = yForCount(tenure.block_count);
+          const yBottom = yForCount(0);
+          const hashLabel = tenure.consensus_hash === "unknown" ? "unknown" : shortHash(tenure.consensus_hash, 10);
+          const tooltip =
+            "tenure " +
+            hashLabel +
+            " | blocks " +
+            tenure.block_count +
+            " | start " +
+            fmtWallClock(tenure.start_ts) +
+            " | end " +
+            fmtWallClock(tenure.end_ts);
+          const markers = (tenure.markers || [])
+            .map((marker) => {
+              const markerRatio = Math.max(0, Math.min(1, Number(marker.ratio) || 0));
+              const markerY = yBottom - markerRatio * (yBottom - yTop);
+              const style = tenureChangeStyle(marker.kind);
+              const markerTitle =
+                "Tenure change: " + style.label + " at " + fmtWallClock(marker.ts);
+              const dashAttr = style.dash ? " stroke-dasharray='" + style.dash + "'" : "";
+              return (
+                "<line x1='" +
+                x.toFixed(2) +
+                "' x2='" +
+                (x + barWidth).toFixed(2) +
+                "' y1='" +
+                markerY.toFixed(2) +
+                "' y2='" +
+                markerY.toFixed(2) +
+                "' stroke='" +
+                style.color +
+                "' stroke-width='1.2'" +
+                dashAttr +
+                "><title>" +
+                escapeHtml(markerTitle) +
+                "</title></line>"
+              );
+            })
+            .join("");
+          const xLabel = tenure.consensus_hash === "unknown" ? "?" : tenure.consensus_hash.slice(0, 6);
+          return (
+            "<rect x='" +
+            x.toFixed(2) +
+            "' y='" +
+            yTop.toFixed(2) +
+            "' width='" +
+            barWidth.toFixed(2) +
+            "' height='" +
+            Math.max(1, yBottom - yTop).toFixed(2) +
+            "' fill='rgba(56, 189, 248, 0.35)' stroke='rgba(56, 189, 248, 0.95)' stroke-width='0.9'><title>" +
+            escapeHtml(tooltip) +
+            "</title></rect>" +
+            markers +
+            "<text class='chart-axis' x='" +
+            (x + barWidth / 2).toFixed(2) +
+            "' y='" +
+            (height - 2) +
+            "' text-anchor='middle' fill='#94a3b8'>" +
+            escapeHtml(xLabel) +
+            "</text>"
+          );
+        })
+        .join("");
+
+      const grid =
+        "<line x1='" + leftPad + "' x2='" + leftPad + "' y1='" + yForCount(maxTotal) + "' y2='" + yForCount(0) + "' stroke='rgba(148, 163, 184, 0.24)' stroke-width='0.6' />" +
+        "<line x1='" + leftPad + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForCount(maxTotal) + "' y2='" + yForCount(maxTotal) + "' stroke='rgba(148, 163, 184, 0.2)' stroke-width='0.6' />" +
+        "<line x1='" + leftPad + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForCount(maxTotal / 2) + "' y2='" + yForCount(maxTotal / 2) + "' stroke='rgba(148, 163, 184, 0.16)' stroke-width='0.6' />" +
+        "<line x1='" + leftPad + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForCount(0) + "' y2='" + yForCount(0) + "' stroke='rgba(148, 163, 184, 0.2)' stroke-width='0.6' />" +
+        "<text class='chart-axis' x='6' y='" + (yForCount(maxTotal) + 3) + "' fill='#94a3b8'>" + maxTotal + "</text>" +
+        "<text class='chart-axis' x='10' y='" + (yForCount(maxTotal / 2) + 3) + "' fill='#94a3b8'>" + Math.round(maxTotal / 2) + "</text>" +
+        "<text class='chart-axis' x='14' y='" + (yForCount(0) + 3) + "' fill='#94a3b8'>0</text>";
+
+      svg.innerHTML = grid + bars;
     }
 
     function linkifyAlertMessage(alert) {
@@ -426,6 +720,13 @@
 
       const costBars = document.getElementById("executionCostBars");
       const costMeta = document.getElementById("executionCostMeta");
+      const costTrendSamples = (data.recent_execution_costs || []).slice(-300);
+      const tenureChanges = data.tenure_change_history || data.recent_tenure_extends || [];
+      renderExecutionCostTrend(
+        "executionCostTrend",
+        costTrendSamples,
+        tenureChanges
+      );
       const costLimits = data.execution_cost_limits || {};
       const latestCostPercent = data.latest_execution_costs_percent || {};
       const latestCosts = data.latest_execution_costs || {};
@@ -433,29 +734,51 @@
       const latestCostTxCount = data.latest_execution_cost_tx_count;
       const latestCostFull = data.latest_execution_cost_percent_full;
       const latestCostAge = data.latest_execution_cost_age_seconds;
-      const dimensions = [
-        ["runtime", "Runtime"],
-        ["write_len", "Write Len"],
-        ["write_cnt", "Write Cnt"],
-        ["read_len", "Read Len"],
-        ["read_cnt", "Read Cnt"],
-      ];
-      const hasCosts = dimensions.some(([key]) => latestCostPercent[key] !== undefined && latestCostPercent[key] !== null);
+      const previousCosts =
+        costTrendSamples.length >= 2 ? (costTrendSamples[costTrendSamples.length - 2] || {}) : {};
+      const previousCostsRaw = previousCosts.costs || {};
+      const previousCostsPercent = previousCosts.costs_percent || {};
+      const hasCosts = COST_DIMENSIONS.some((dim) => latestCostPercent[dim.key] !== undefined && latestCostPercent[dim.key] !== null);
       if (!hasCosts) {
         costBars.innerHTML = "<div class='muted'>No mined block costs yet.</div>";
         costMeta.textContent = "No mined block costs yet";
       } else {
         costBars.innerHTML =
           "<div class='cost-grid'>" +
-          dimensions
-            .map(([key, label]) => {
+          COST_DIMENSIONS
+            .map((dim) => {
+              const key = dim.key;
+              const label = dim.label;
               const pct = Number(latestCostPercent[key] || 0);
               const raw = latestCosts[key];
               const limit = costLimits[key];
+              const prevRaw = Number(previousCostsRaw[key]);
+              const prevPct = Number(previousCostsPercent[key]);
+              const hasPrev = Number.isFinite(prevRaw) && Number.isFinite(prevPct);
+              const deltaRaw = hasPrev && Number.isFinite(raw) ? Number(raw) - prevRaw : null;
+              const deltaPct = hasPrev ? pct - prevPct : null;
+              const deltaRawText =
+                deltaRaw === null
+                  ? "n/a"
+                  : (deltaRaw >= 0 ? "+" : "") + Math.round(deltaRaw).toLocaleString();
+              const deltaPctText =
+                deltaPct === null
+                  ? "n/a"
+                  : (deltaPct >= 0 ? "+" : "") + deltaPct.toFixed(1) + "%";
               const valueText =
                 Number.isFinite(raw) && Number.isFinite(limit)
                   ? Number(raw).toLocaleString() + "/" + Number(limit).toLocaleString()
                   : "-";
+              const tooltip =
+                label +
+                ": " +
+                valueText +
+                " (" +
+                pct.toFixed(1) +
+                "%)\nΔ raw vs prior: " +
+                deltaRawText +
+                "\nΔ pct vs prior: " +
+                deltaPctText;
               const fillColor =
                 pct >= 85 ? "#ef4444" : pct >= 70 ? "#f59e0b" : "#38bdf8";
               return (
@@ -464,7 +787,7 @@
                 escapeHtml(label) +
                 "</div>" +
                 "<div class='cost-track' title='" +
-                escapeHtml(valueText) +
+                escapeAttr(tooltip) +
                 "'>" +
                 "<div class='cost-fill' style='width:" +
                 Math.max(0, Math.min(100, pct)).toFixed(1) +
@@ -485,30 +808,27 @@
         if (Number.isFinite(latestCostTxCount)) metaParts.push("txs " + latestCostTxCount);
         if (Number.isFinite(latestCostFull)) metaParts.push("percent_full " + latestCostFull + "%");
         if (Number.isFinite(latestCostAge)) metaParts.push("updated " + fmtAge(Number(latestCostAge)) + " ago");
+        if (costTrendSamples.length > 1) metaParts.push("trend " + costTrendSamples.length + " mined blocks");
         costMeta.textContent = metaParts.join(" | ") || "Latest mined block costs";
       }
 
-      const recentProposalItems = (data.recent_proposals || []).slice(0, 40);
-
-      const proposalStrip = document.getElementById("proposalStrip");
-      if (!recentProposalItems.length) {
-        proposalStrip.innerHTML = "<div class='muted'>No proposals yet.</div>";
+      const tenureBlocksMeta = document.getElementById("tenureBlocksMeta");
+      const tenureCounts = data.recent_tenure_block_counts || [];
+      const tenureBlockChanges = data.tenure_change_history || data.recent_tenure_extends || [];
+      renderTenureBlocksChart("tenureBlocksChart", tenureCounts, tenureBlockChanges);
+      if (!tenureCounts.length) {
+        tenureBlocksMeta.textContent = "No tenure block samples yet";
       } else {
-        const ordered = recentProposalItems
-          .slice()
-          .sort((a, b) => (b.last_update_ts || 0) - (a.last_update_ts || 0));
-        proposalStrip.innerHTML = ordered.map((item) => {
-          const status = item.status || (item.is_open ? "in_progress" : "approved");
-          const cls = status === "approved"
-            ? "outcome-dot outcome-approved"
-            : status === "rejected"
-              ? "outcome-dot outcome-rejected"
-              : status === "in_progress"
-                ? "outcome-dot outcome-in-progress"
-                : "outcome-dot outcome-unknown";
-          const title = (item.signature_hash ? item.signature_hash.slice(0, 12) : "proposal") + " " + status;
-          return "<span class='" + cls + "' title='" + escapeHtml(title) + "'></span>";
-        }).join("");
+        const totalBlocks = tenureCounts.reduce((sum, item) => {
+          const count = Number(item && item.block_count);
+          return sum + (Number.isFinite(count) ? count : 0);
+        }, 0);
+        tenureBlocksMeta.textContent =
+          "last " +
+          tenureCounts.length +
+          " tenures | " +
+          totalBlocks +
+          " confirmed blocks | source node tips";
       }
 
       const reports = data.recent_reports || [];
