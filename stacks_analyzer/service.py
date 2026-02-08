@@ -72,6 +72,7 @@ class MonitoringService:
                 port=config.web.port,
                 state_provider=self._dashboard_state,
                 history_provider=self._history_api if self.history_store else None,
+                history_window_provider=self._history_window_api if self.history_store else None,
                 schema_provider=self._schema_api if self.history_store else None,
                 alerts_provider=self._alerts_api if self.history_store else None,
                 reports_provider=self._reports_api if self.history_store else None,
@@ -357,6 +358,338 @@ class MonitoringService:
             limit=limit,
         )
         return {"events": events}
+
+    def _history_window_api(self, params: Dict[str, list]) -> Dict[str, Any]:
+        if self.history_store is None:
+            return {
+                "start_ts": None,
+                "stop_ts": None,
+                "duration_seconds": 0,
+                "summary": {},
+                "alerts": [],
+                "reports": [],
+                "timeline": [],
+                "anomalous_proposals": [],
+                "event_kind_counts": {},
+            }
+
+        now = self._state_now()
+        start_ts = _float_query_param(params, "start")
+        if start_ts is None:
+            start_ts = _float_query_param(params, "from")
+        stop_ts = _float_query_param(params, "stop")
+        if stop_ts is None:
+            stop_ts = _float_query_param(params, "to")
+        if stop_ts is None:
+            stop_ts = now
+        if start_ts is None:
+            start_ts = max(0.0, float(stop_ts) - 600.0)
+        if start_ts > stop_ts:
+            start_ts, stop_ts = stop_ts, start_ts
+
+        events_limit = max(100, min(5000, _int_query_param(params, "events_limit", 1600) or 1600))
+        alerts_limit = max(50, min(1000, _int_query_param(params, "alerts_limit", 300) or 300))
+        reports_limit = max(20, min(500, _int_query_param(params, "reports_limit", 200) or 200))
+        timeline_limit = max(50, min(1200, _int_query_param(params, "timeline_limit", 400) or 400))
+        proposal_limit = max(10, min(300, _int_query_param(params, "proposal_limit", 80) or 80))
+
+        alerts = self.history_store.query_alerts(
+            from_ts=start_ts,
+            to_ts=stop_ts,
+            limit=alerts_limit,
+        )
+        reports = self.history_store.list_reports(
+            from_ts=start_ts,
+            to_ts=stop_ts,
+            limit=reports_limit,
+        )
+        events_desc = self.history_store.query_events(
+            from_ts=start_ts,
+            to_ts=stop_ts,
+            limit=events_limit,
+        )
+        events = list(reversed(events_desc))
+
+        event_kind_counts: Dict[str, int] = {}
+        for event in events:
+            kind = str(event.get("kind") or "unknown")
+            event_kind_counts[kind] = event_kind_counts.get(kind, 0) + 1
+
+        timeline_kinds = {
+            "node_consensus",
+            "node_burnchain_reorg",
+            "node_sortition_winner_selected",
+            "node_sortition_winner_rejected",
+            "node_tenure_change",
+            "signer_block_proposal",
+            "signer_block_rejection",
+            "signer_rejection_threshold_reached",
+            "signer_threshold_reached",
+            "signer_block_pushed",
+            "signer_new_block_event",
+        }
+        timeline = []
+        for event in events:
+            kind = str(event.get("kind") or "")
+            if kind not in timeline_kinds:
+                continue
+            timeline.append(self._summarize_history_event(event))
+        if len(timeline) > timeline_limit:
+            timeline = timeline[-timeline_limit:]
+
+        proposal_groups: Dict[str, Dict[str, Any]] = {}
+        for event in events:
+            kind = str(event.get("kind") or "")
+            if kind not in {
+                "signer_block_proposal",
+                "signer_block_acceptance",
+                "signer_block_rejection",
+                "signer_rejection_threshold_reached",
+                "signer_threshold_reached",
+                "signer_block_pushed",
+                "signer_new_block_event",
+            }:
+                continue
+            data = event.get("data") or {}
+            sig = data.get("signer_signature_hash")
+            if not isinstance(sig, str) or not sig:
+                continue
+            entry = proposal_groups.get(sig)
+            if entry is None:
+                entry = {
+                    "signature_hash": sig,
+                    "block_height": data.get("block_height"),
+                    "burn_height": data.get("burn_height"),
+                    "first_ts": event.get("ts"),
+                    "last_ts": event.get("ts"),
+                    "proposal_ts": None,
+                    "approved_ts": None,
+                    "rejected_ts": None,
+                    "pushed_ts": None,
+                    "accept_count": 0,
+                    "reject_count": 0,
+                    "threshold_seen": False,
+                    "rejection_threshold_seen": False,
+                    "reject_reasons": {},
+                }
+                proposal_groups[sig] = entry
+            event_ts = float(event.get("ts") or 0.0)
+            first_ts = float(entry.get("first_ts") or event_ts)
+            last_ts = float(entry.get("last_ts") or event_ts)
+            entry["first_ts"] = min(first_ts, event_ts)
+            entry["last_ts"] = max(last_ts, event_ts)
+            if entry.get("block_height") is None and data.get("block_height") is not None:
+                entry["block_height"] = data.get("block_height")
+            if entry.get("burn_height") is None and data.get("burn_height") is not None:
+                entry["burn_height"] = data.get("burn_height")
+            if kind == "signer_block_proposal":
+                proposal_ts = entry.get("proposal_ts")
+                entry["proposal_ts"] = event_ts if proposal_ts is None else min(float(proposal_ts), event_ts)
+            elif kind == "signer_block_acceptance":
+                entry["accept_count"] = int(entry.get("accept_count") or 0) + 1
+            elif kind == "signer_block_rejection":
+                entry["reject_count"] = int(entry.get("reject_count") or 0) + 1
+                reason = data.get("reject_reason")
+                if isinstance(reason, str) and reason:
+                    reasons = entry.get("reject_reasons") or {}
+                    reasons[reason] = int(reasons.get(reason) or 0) + 1
+                    entry["reject_reasons"] = reasons
+            elif kind == "signer_threshold_reached":
+                entry["threshold_seen"] = True
+                approved_ts = entry.get("approved_ts")
+                entry["approved_ts"] = event_ts if approved_ts is None else min(float(approved_ts), event_ts)
+            elif kind == "signer_rejection_threshold_reached":
+                entry["rejection_threshold_seen"] = True
+                rejected_ts = entry.get("rejected_ts")
+                entry["rejected_ts"] = event_ts if rejected_ts is None else min(float(rejected_ts), event_ts)
+            elif kind in ("signer_block_pushed", "signer_new_block_event"):
+                pushed_ts = entry.get("pushed_ts")
+                entry["pushed_ts"] = event_ts if pushed_ts is None else min(float(pushed_ts), event_ts)
+
+        proposal_summaries = []
+        for entry in proposal_groups.values():
+            threshold_seen = bool(entry.get("threshold_seen"))
+            rejection_threshold_seen = bool(entry.get("rejection_threshold_seen"))
+            pushed_ts = entry.get("pushed_ts")
+            if rejection_threshold_seen:
+                status = "rejected"
+            elif threshold_seen or pushed_ts is not None:
+                status = "approved"
+            else:
+                status = "in_progress"
+            reject_count = int(entry.get("reject_count") or 0)
+            if reject_count <= 0 and not rejection_threshold_seen:
+                continue
+            reasons = entry.get("reject_reasons") or {}
+            top_reason = None
+            if reasons:
+                top_reason = sorted(
+                    reasons.items(),
+                    key=lambda item: (-int(item[1]), str(item[0])),
+                )[0][0]
+            proposal_summaries.append(
+                {
+                    "signature_hash": entry.get("signature_hash"),
+                    "block_height": entry.get("block_height"),
+                    "burn_height": entry.get("burn_height"),
+                    "status": status,
+                    "first_ts": entry.get("first_ts"),
+                    "last_ts": entry.get("last_ts"),
+                    "proposal_ts": entry.get("proposal_ts"),
+                    "approved_ts": entry.get("approved_ts"),
+                    "rejected_ts": entry.get("rejected_ts"),
+                    "pushed_ts": entry.get("pushed_ts"),
+                    "accept_count": int(entry.get("accept_count") or 0),
+                    "reject_count": reject_count,
+                    "top_reject_reason": top_reason,
+                }
+            )
+        proposal_summaries.sort(key=lambda item: float(item.get("last_ts") or 0.0), reverse=True)
+        if len(proposal_summaries) > proposal_limit:
+            proposal_summaries = proposal_summaries[:proposal_limit]
+
+        severity_counts = {"info": 0, "warning": 0, "critical": 0}
+        for alert in alerts:
+            sev = str(alert.get("severity") or "").lower()
+            if sev in severity_counts:
+                severity_counts[sev] += 1
+
+        summary = {
+            "events": len(events),
+            "alerts": len(alerts),
+            "reports": len(reports),
+            "burn_blocks": event_kind_counts.get("node_consensus", 0),
+            "sortitions": (
+                event_kind_counts.get("node_sortition_winner_selected", 0)
+                + event_kind_counts.get("node_sortition_winner_rejected", 0)
+            ),
+            "tenure_extends": event_kind_counts.get("node_tenure_change", 0),
+            "anomalous_proposals": len(proposal_summaries),
+            "severity_counts": severity_counts,
+        }
+        return {
+            "start_ts": start_ts,
+            "stop_ts": stop_ts,
+            "duration_seconds": max(0.0, float(stop_ts) - float(start_ts)),
+            "summary": summary,
+            "alerts": alerts,
+            "reports": reports,
+            "timeline": timeline,
+            "anomalous_proposals": proposal_summaries,
+            "event_kind_counts": event_kind_counts,
+        }
+
+    def _summarize_history_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        kind = str(event.get("kind") or "")
+        data = event.get("data") or {}
+        message = kind
+        if kind == "node_consensus":
+            burn = data.get("burn_height")
+            stx = data.get("stacks_block_height")
+            consensus = data.get("consensus_hash")
+            message = "Consensus advanced"
+            details = []
+            if burn is not None:
+                details.append("burn=%s" % burn)
+            if stx is not None:
+                details.append("stx=%s" % stx)
+            if isinstance(consensus, str) and consensus:
+                details.append("consensus=%s" % self._short_id(consensus, 12))
+            if details:
+                message = "%s | %s" % (message, " ".join(details))
+        elif kind == "node_burnchain_reorg":
+            height = data.get("ancestor_height")
+            message = "Burnchain reorg detected"
+            if height is not None:
+                message = "%s | ancestor_height=%s" % (message, height)
+        elif kind == "node_sortition_winner_selected":
+            burn = data.get("burn_height")
+            winner = data.get("winner_txid")
+            message = "Sortition winner selected"
+            parts = []
+            if burn is not None:
+                parts.append("burn=%s" % burn)
+            if isinstance(winner, str) and winner:
+                parts.append("winner_txid=%s" % self._short_id(winner, 12))
+            if parts:
+                message = "%s | %s" % (message, " ".join(parts))
+        elif kind == "node_sortition_winner_rejected":
+            burn = data.get("burn_height")
+            message = "Sortition selected null miner"
+            if burn is not None:
+                message = "%s | burn=%s" % (message, burn)
+        elif kind == "node_tenure_change":
+            change_kind = data.get("tenure_change_kind")
+            block_height = data.get("block_height")
+            burn_height = data.get("burn_height")
+            message = "Tenure change"
+            parts = []
+            if isinstance(change_kind, str) and change_kind:
+                parts.append("kind=%s" % change_kind)
+            if block_height is not None:
+                parts.append("stx=%s" % block_height)
+            if burn_height is not None:
+                parts.append("burn=%s" % burn_height)
+            if parts:
+                message = "%s | %s" % (message, " ".join(parts))
+        elif kind == "signer_block_proposal":
+            sig = data.get("signer_signature_hash")
+            block_height = data.get("block_height")
+            message = "Proposal seen"
+            parts = []
+            if isinstance(sig, str) and sig:
+                parts.append(self._short_id(sig, 12))
+            if block_height is not None:
+                parts.append("height=%s" % block_height)
+            if parts:
+                message = "%s | %s" % (message, " ".join(parts))
+        elif kind == "signer_block_rejection":
+            sig = data.get("signer_signature_hash")
+            reason = data.get("reject_reason")
+            message = "Signer rejection"
+            parts = []
+            if isinstance(sig, str) and sig:
+                parts.append(self._short_id(sig, 12))
+            if isinstance(reason, str) and reason:
+                parts.append("reason=%s" % reason)
+            if parts:
+                message = "%s | %s" % (message, " ".join(parts))
+        elif kind == "signer_rejection_threshold_reached":
+            sig = data.get("signer_signature_hash")
+            message = "Proposal reached rejection threshold"
+            if isinstance(sig, str) and sig:
+                message = "%s | %s" % (message, self._short_id(sig, 12))
+        elif kind == "signer_threshold_reached":
+            sig = data.get("signer_signature_hash")
+            message = "Proposal reached approval threshold"
+            if isinstance(sig, str) and sig:
+                message = "%s | %s" % (message, self._short_id(sig, 12))
+        elif kind in ("signer_block_pushed", "signer_new_block_event"):
+            sig = data.get("signer_signature_hash")
+            block_height = data.get("block_height")
+            message = "Confirmed block observed"
+            parts = []
+            if isinstance(sig, str) and sig:
+                parts.append(self._short_id(sig, 12))
+            if block_height is not None:
+                parts.append("height=%s" % block_height)
+            if parts:
+                message = "%s | %s" % (message, " ".join(parts))
+        return {
+            "id": event.get("id"),
+            "ts": event.get("ts"),
+            "source": event.get("source"),
+            "kind": kind,
+            "message": message,
+            "data": data,
+        }
+
+    @staticmethod
+    def _short_id(value: str, size: int = 12) -> str:
+        text = str(value)
+        if len(text) <= size:
+            return text
+        return text[:size]
 
     def _extract_signature_hash(self, alert: Alert) -> Optional[str]:
         for value in (alert.key, alert.message):

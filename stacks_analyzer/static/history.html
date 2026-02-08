@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stacks Analyzer History</title>
+  <link rel="stylesheet" href="/static/history.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <h1>Stacks Analyzer History</h1>
+        <div class="muted" id="windowLabel">Window: -</div>
+      </div>
+      <div class="header-actions">
+        <a class="header-link" href="/">Live Dashboard</a>
+        <div class="muted" id="updated">Waiting for data...</div>
+      </div>
+    </div>
+
+    <div class="card controls">
+      <div class="control-group">
+        <label for="startTime">Start</label>
+        <input id="startTime" type="datetime-local" />
+      </div>
+      <div class="control-group">
+        <label for="stopTime">Stop</label>
+        <input id="stopTime" type="datetime-local" />
+      </div>
+      <div class="quick-actions">
+        <button type="button" data-minutes="10">Last 10m</button>
+        <button type="button" data-minutes="30">Last 30m</button>
+        <button type="button" data-minutes="60">Last 1h</button>
+        <button type="button" data-minutes="360">Last 6h</button>
+      </div>
+      <button type="button" id="applyWindow">Apply</button>
+    </div>
+
+    <div class="summary-grid">
+      <div class="card metric"><div class="label">Events</div><div class="value" id="sumEvents">-</div></div>
+      <div class="card metric"><div class="label">Alerts</div><div class="value" id="sumAlerts">-</div></div>
+      <div class="card metric"><div class="label">Reports</div><div class="value" id="sumReports">-</div></div>
+      <div class="card metric"><div class="label">Burn Blocks</div><div class="value" id="sumBurnBlocks">-</div></div>
+      <div class="card metric"><div class="label">Sortitions</div><div class="value" id="sumSortitions">-</div></div>
+      <div class="card metric"><div class="label">Tenure Extends</div><div class="value" id="sumTenureExtends">-</div></div>
+      <div class="card metric"><div class="label">Anomalous Proposals</div><div class="value" id="sumAnom">-</div></div>
+      <div class="card metric"><div class="label">Severity Mix</div><div class="value small" id="sumSeverity">-</div></div>
+    </div>
+
+    <div class="card">
+      <div class="panel-title">Timeline</div>
+      <table>
+        <thead>
+          <tr><th>Time</th><th>Source</th><th>Kind</th><th>Summary</th></tr>
+        </thead>
+        <tbody id="timelineBody"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="panel-title">Anomalous Proposals</div>
+      <table>
+        <thead>
+          <tr><th>Signature</th><th>Status</th><th>Height</th><th>Accept</th><th>Reject</th><th>Reason</th><th>Last Seen</th></tr>
+        </thead>
+        <tbody id="proposalsBody"></tbody>
+      </table>
+    </div>
+
+    <div class="two-col">
+      <div class="card">
+        <div class="panel-title">Alerts</div>
+        <table>
+          <thead>
+            <tr><th>Time</th><th>Severity</th><th>Message</th><th>Report</th></tr>
+          </thead>
+          <tbody id="alertsBody"></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="panel-title">Event Kinds</div>
+        <div id="kindCounts" class="kind-grid"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="panel-title">Reports</div>
+      <table>
+        <thead>
+          <tr><th>Time</th><th>Severity</th><th>Summary</th><th>Open</th></tr>
+        </thead>
+        <tbody id="reportsBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="/static/history.js"></script>
+</body>
+</html>

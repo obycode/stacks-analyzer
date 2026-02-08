@@ -48,6 +48,19 @@
       color: #dbeafe;
       background: rgba(15, 23, 42, 0.48);
     }
+    .header-link {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      color: #bae6fd;
+      background: rgba(15, 23, 42, 0.48);
+      text-decoration: none;
+    }
+    .header-link:hover {
+      border-color: rgba(186, 230, 253, 0.45);
+      text-decoration: none;
+    }
     h1 { margin: 0; font-size: 28px; letter-spacing: 0.4px; }
     .muted { color: var(--muted); font-size: 13px; }
     .grid {

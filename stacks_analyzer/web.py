@@ -16,11 +16,13 @@ def _load_static_html(filename: str) -> str:
 
 DASHBOARD_HTML = _load_static_html("dashboard.html")
 REPORT_HTML = _load_static_html("report.html")
+HISTORY_HTML = _load_static_html("history.html")
 
 
 def build_handler(
     state_provider: Callable[[], Dict[str, Any]],
     history_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+    history_window_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
     schema_provider: Optional[Callable[[], Dict[str, Any]]] = None,
     alerts_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
     reports_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
@@ -82,6 +84,18 @@ def build_handler(
                     return
                 params = parse_qs(parsed.query)
                 payload = json.dumps(history_provider(params), sort_keys=True).encode("utf-8")
+                self._send_bytes(payload, "application/json; charset=utf-8")
+                return
+            if parsed.path == "/api/history-window":
+                if history_window_provider is None:
+                    self._send_bytes(
+                        b"history disabled\n", "text/plain; charset=utf-8", status=404
+                    )
+                    return
+                params = parse_qs(parsed.query)
+                payload = json.dumps(history_window_provider(params), sort_keys=True).encode(
+                    "utf-8"
+                )
                 self._send_bytes(payload, "application/json; charset=utf-8")
                 return
             if parsed.path == "/api/schema":
@@ -156,6 +170,14 @@ def build_handler(
                     return
                 self._send_bytes(REPORT_HTML.encode("utf-8"), "text/html; charset=utf-8")
                 return
+            if parsed.path == "/history":
+                if history_window_provider is None:
+                    self._send_bytes(
+                        b"history disabled\n", "text/plain; charset=utf-8", status=404
+                    )
+                    return
+                self._send_bytes(HISTORY_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                return
             if parsed.path == "/healthz":
                 self._send_bytes(b"ok\n", "text/plain; charset=utf-8")
                 return
@@ -193,6 +215,7 @@ class DashboardServer:
         port: int,
         state_provider: Callable[[], Dict[str, Any]],
         history_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+        history_window_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
         schema_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         alerts_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
         reports_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
@@ -204,6 +227,7 @@ class DashboardServer:
         self.port = port
         self.state_provider = state_provider
         self.history_provider = history_provider
+        self.history_window_provider = history_window_provider
         self.schema_provider = schema_provider
         self.alerts_provider = alerts_provider
         self.reports_provider = reports_provider
@@ -217,6 +241,7 @@ class DashboardServer:
         handler = build_handler(
             self.state_provider,
             history_provider=self.history_provider,
+            history_window_provider=self.history_window_provider,
             schema_provider=self.schema_provider,
             alerts_provider=self.alerts_provider,
             reports_provider=self.reports_provider,
