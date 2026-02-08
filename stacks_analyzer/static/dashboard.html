@@ -20,7 +20,16 @@
       </div>
     </div>
 
-    <div class="grid">
+    <div class="card mobile-only card-mobile-status">
+      <div class="mobile-status-head">
+        <div class="label">Network Status</div>
+        <span id="mobileStatusBadge" class="sev sev-ok">ok</span>
+      </div>
+      <div class="mobile-status-text" id="mobileStatusText">Waiting for data...</div>
+      <div class="mobile-status-meta" id="mobileStatusMeta">-</div>
+    </div>
+
+    <div class="grid key-metrics">
       <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">-</div></div>
       <div class="card"><div class="label">Node Tip Age</div><div class="value" id="tipAge">-</div></div>
       <div class="card"><div class="label">Signer Proposal Age</div><div class="value" id="proposalAge">-</div></div>
@@ -42,7 +51,7 @@
           <span><span class="legend-dot" style="background:#ef4444;"></span>DeadlineReached</span>
         </div>
       </div>
-      <div class="card chart-card">
+      <div class="card chart-card mobile-hide">
         <div class="panel-title">Execution Cost Usage</div>
         <div id="executionCostBars"></div>
         <svg id="executionCostTrend"></svg>
@@ -59,7 +68,7 @@
         </div>
         <div class="chart-meta" id="executionCostMeta">No mined block costs yet</div>
       </div>
-      <div class="card chart-card">
+      <div class="card chart-card mobile-hide">
         <div class="panel-title">Tenure Block Throughput</div>
         <svg id="tenureBlocksChart"></svg>
         <div class="chart-meta" id="tenureBlocksMeta">No tenure block samples yet</div>
@@ -71,7 +80,7 @@
       </div>
     </div>
 
-    <div class="card">
+    <div class="card card-proposals">
       <div class="panel-title">Recent Proposals (Latest 5)</div>
       <table>
         <thead>
@@ -81,12 +90,12 @@
       </table>
     </div>
 
-    <div class="card">
+    <div class="card card-sortitions">
       <div class="panel-title">Recent Sortitions (Latest 3 Burn Heights)</div>
       <div class="sortition-grid" id="sortitionCards"></div>
     </div>
 
-    <div class="card">
+    <div class="card mobile-hide">
       <div class="panel-title">Last 5 Tenure Extends</div>
       <table>
         <thead>
@@ -97,7 +106,7 @@
     </div>
 
     <div class="two">
-      <div class="card">
+      <div class="card card-alerts">
         <div class="panel-title">Recent Alerts</div>
         <table>
           <thead>
@@ -106,7 +115,7 @@
           <tbody id="alertsBody"></tbody>
         </table>
       </div>
-      <div class="card">
+      <div class="card mobile-hide">
         <div class="panel-title">All Signers</div>
         <table>
           <thead>
@@ -117,7 +126,7 @@
       </div>
     </div>
 
-    <div class="card">
+    <div class="card mobile-hide">
       <div class="panel-title">Recent Reports</div>
       <table class="reports-table">
         <colgroup>
@@ -138,7 +147,7 @@
       </div>
     </div>
 
-    <div class="card">
+    <div class="card mobile-hide">
       <div class="panel-title">Counters</div>
       <table>
         <tbody id="countsBody"></tbody>

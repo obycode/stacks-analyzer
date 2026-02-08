@@ -710,6 +710,50 @@
       nextBtn.disabled = reportsPage >= totalPages - 1;
     }
 
+    function compactStatusMessage(alert) {
+      if (!alert) return "No recent alerts";
+      const message = String(alert.message || alert.key || "No recent alerts");
+      if (message.length <= 120) return message;
+      return message.slice(0, 117) + "...";
+    }
+
+    function renderMobileStatus(data, alerts) {
+      const badge = document.getElementById("mobileStatusBadge");
+      const text = document.getElementById("mobileStatusText");
+      const meta = document.getElementById("mobileStatusMeta");
+      if (!badge || !text || !meta) return;
+
+      const newest = alerts.length ? alerts[alerts.length - 1] : null;
+      const sev = String((newest && newest.severity) || "ok").toLowerCase();
+      const sevClass =
+        "sev sev-" +
+        (sev === "warning"
+          ? "warning"
+          : sev === "critical"
+            ? "critical"
+            : sev === "info"
+              ? "info"
+              : "ok");
+      badge.className = sevClass;
+      badge.textContent = sev;
+      text.textContent = compactStatusMessage(newest);
+
+      const tipAge = fmtAge(data.node_tip_age_seconds);
+      const proposalAge = fmtAge(data.signer_proposal_age_seconds);
+      const mempoolReady =
+        data.mempool_ready_txs === null || data.mempool_ready_txs === undefined
+          ? "-"
+          : String(data.mempool_ready_txs);
+      meta.textContent =
+        "Tip " +
+        tipAge +
+        " | Proposal " +
+        proposalAge +
+        " | Mempool " +
+        mempoolReady +
+        " txs";
+    }
+
     function humanReadableReportAlertTitle(item) {
       if (item && item.summary) {
         return String(item.summary);
@@ -803,6 +847,7 @@
         const sevClass = "sev sev-" + (sev === "warning" ? "warning" : sev === "critical" ? "critical" : sev === "info" ? "info" : "ok");
         return "<tr><td>" + escapeHtml(new Date(item.ts * 1000).toLocaleTimeString()) + "</td><td><span class='" + sevClass + "'>" + escapeHtml(sev) + "</span></td><td>" + linkifyAlertMessage(item) + "</td></tr>";
       }).join("");
+      renderMobileStatus(data, alerts);
 
       const costBars = document.getElementById("executionCostBars");
       const costMeta = document.getElementById("executionCostMeta");
