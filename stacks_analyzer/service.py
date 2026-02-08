@@ -60,6 +60,7 @@ class MonitoringService:
                 path=config.history.path,
                 retention_hours=config.history.retention_hours,
             )
+            self._hydrate_recent_reports()
 
         self.notifier: Optional[TelegramNotifier] = None
         if config.telegram.enabled:
@@ -83,6 +84,28 @@ class MonitoringService:
 
         signal.signal(signal.SIGINT, self._handle_stop)
         signal.signal(signal.SIGTERM, self._handle_stop)
+
+    def _hydrate_recent_reports(self) -> None:
+        if self.history_store is None:
+            return
+        try:
+            rows = self.history_store.list_reports(limit=self.recent_reports.maxlen)
+        except Exception as exc:  # pragma: no cover - defensive startup guard
+            print(
+                "[WARN] failed to hydrate recent reports from history: %s" % exc,
+                flush=True,
+            )
+            return
+        for row in reversed(rows):
+            self.recent_reports.append(
+                {
+                    "ts": row.get("ts"),
+                    "report_id": row.get("id"),
+                    "alert_key": row.get("alert_key"),
+                    "severity": row.get("severity"),
+                    "summary": row.get("summary"),
+                }
+            )
 
     def run(self) -> int:
         try:

@@ -237,6 +237,26 @@
       font: inherit;
     }
     .hash-btn:hover { border-color: rgba(186, 230, 253, 0.45); }
+    .table-pager {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .pager-btn {
+      border: 1px solid var(--line);
+      background: rgba(15, 23, 42, 0.55);
+      color: #dbeafe;
+      border-radius: 8px;
+      padding: 4px 8px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .pager-btn:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
     .proposal-row-in-progress {
       background: rgba(56, 189, 248, 0.1);
     }

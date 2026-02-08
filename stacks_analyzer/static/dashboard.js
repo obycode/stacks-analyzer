@@ -127,6 +127,9 @@
 
     const blockCadenceHistory = [];
     const mempoolHistory = [];
+    const REPORTS_PAGE_SIZE = 5;
+    let reportsPage = 0;
+    let reportsNewestFirst = [];
     let lastBlockHeight = null;
     let lastMempoolEventTs = null;
     const COST_DIMENSIONS = [
@@ -645,6 +648,36 @@
       }).join("");
     }
 
+    function renderReportsTable() {
+      const reportsBody = document.getElementById("reportsBody");
+      const prevBtn = document.getElementById("reportsPrev");
+      const nextBtn = document.getElementById("reportsNext");
+      const pageLabel = document.getElementById("reportsPageLabel");
+      const total = reportsNewestFirst.length;
+      const totalPages = Math.max(1, Math.ceil(total / REPORTS_PAGE_SIZE));
+      if (reportsPage >= totalPages) reportsPage = totalPages - 1;
+      if (reportsPage < 0) reportsPage = 0;
+
+      if (!total) {
+        reportsBody.innerHTML = "<tr><td colspan='4'>No reports yet.</td></tr>";
+      } else {
+        const start = reportsPage * REPORTS_PAGE_SIZE;
+        const end = start + REPORTS_PAGE_SIZE;
+        const pageItems = reportsNewestFirst.slice(start, end);
+        reportsBody.innerHTML = pageItems.map((item) => {
+          const sev = (item.severity || "ok").toLowerCase();
+          const sevClass = "sev sev-" + (sev === "warning" ? "warning" : sev === "critical" ? "critical" : sev === "info" ? "info" : "ok");
+          const reportId = item.report_id;
+          const reportLink = reportId ? linkTo("/report?id=" + encodeURIComponent(reportId), "view", false) : "-";
+          return "<tr><td>" + escapeHtml(new Date(item.ts * 1000).toLocaleTimeString()) + "</td><td><span class='" + sevClass + "'>" + escapeHtml(sev) + "</span></td><td>" + escapeHtml(item.alert_key || "-") + "</td><td>" + reportLink + "</td></tr>";
+        }).join("");
+      }
+
+      pageLabel.textContent = "Page " + (reportsPage + 1) + "/" + totalPages;
+      prevBtn.disabled = reportsPage <= 0;
+      nextBtn.disabled = reportsPage >= totalPages - 1;
+    }
+
     function render(data) {
       const now = new Date();
       const nowEpoch = Date.now() / 1000;
@@ -832,18 +865,8 @@
       }
 
       const reports = data.recent_reports || [];
-      const reportsBody = document.getElementById("reportsBody");
-      if (!reports.length) {
-        reportsBody.innerHTML = "<tr><td colspan='4'>No reports yet.</td></tr>";
-      } else {
-        reportsBody.innerHTML = reports.slice().reverse().slice(0, 20).map((item) => {
-          const sev = (item.severity || "ok").toLowerCase();
-          const sevClass = "sev sev-" + (sev === "warning" ? "warning" : sev === "critical" ? "critical" : sev === "info" ? "info" : "ok");
-          const reportId = item.report_id;
-          const reportLink = reportId ? linkTo("/report?id=" + encodeURIComponent(reportId), "view", false) : "-";
-          return "<tr><td>" + escapeHtml(new Date(item.ts * 1000).toLocaleTimeString()) + "</td><td><span class='" + sevClass + "'>" + escapeHtml(sev) + "</span></td><td>" + escapeHtml(item.alert_key || "-") + "</td><td>" + reportLink + "</td></tr>";
-        }).join("");
-      }
+      reportsNewestFirst = reports.slice().reverse();
+      renderReportsTable();
 
       const signers = data.signers || data.large_signers || [];
       document.getElementById("signersBody").innerHTML = signers.map((item) => {
@@ -934,4 +957,14 @@
         target.textContent = "Copied";
         setTimeout(() => { target.textContent = prev; }, 900);
       } catch (_err) {}
+    });
+
+    document.getElementById("reportsPrev").addEventListener("click", () => {
+      reportsPage -= 1;
+      renderReportsTable();
+    });
+
+    document.getElementById("reportsNext").addEventListener("click", () => {
+      reportsPage += 1;
+      renderReportsTable();
     });
