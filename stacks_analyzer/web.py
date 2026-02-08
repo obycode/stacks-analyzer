@@ -28,6 +28,12 @@ def build_handler(
     reports_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
     report_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
     report_logs_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+    report_filtered_logs_provider: Optional[
+        Callable[[Dict[str, list]], Dict[str, Any]]
+    ] = None,
+    report_ai_package_provider: Optional[
+        Callable[[Dict[str, list]], Dict[str, Any]]
+    ] = None,
     sql_provider: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> type:
     class DashboardHandler(BaseHTTPRequestHandler):
@@ -40,6 +46,27 @@ def build_handler(
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+
+        def _send_download_payload(self, payload: Dict[str, Any]) -> None:
+            status = int(payload.get("status", 200))
+            filename = payload.get("filename")
+            content = payload.get("content", "")
+            content_type = str(
+                payload.get("content_type", "text/plain; charset=utf-8")
+            )
+            if not isinstance(content, (bytes, bytearray)):
+                content = str(content).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            if filename:
+                self.send_header(
+                    "Content-Disposition",
+                    "attachment; filename=\"%s\"" % filename,
+                )
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -144,23 +171,25 @@ def build_handler(
                     )
                     return
                 params = parse_qs(parsed.query)
-                payload = report_logs_provider(params)
-                status = int(payload.get("status", 200))
-                filename = payload.get("filename")
-                content = payload.get("content", "")
-                if not isinstance(content, (bytes, bytearray)):
-                    content = str(content).encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                if filename:
-                    self.send_header(
-                        "Content-Disposition",
-                        "attachment; filename=\"%s\"" % filename,
+                self._send_download_payload(report_logs_provider(params))
+                return
+            if parsed.path == "/api/report-filtered-logs":
+                if report_filtered_logs_provider is None:
+                    self._send_bytes(
+                        b"history disabled\n", "text/plain; charset=utf-8", status=404
                     )
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Content-Length", str(len(content)))
-                self.end_headers()
-                self.wfile.write(content)
+                    return
+                params = parse_qs(parsed.query)
+                self._send_download_payload(report_filtered_logs_provider(params))
+                return
+            if parsed.path == "/api/report-ai-package":
+                if report_ai_package_provider is None:
+                    self._send_bytes(
+                        b"history disabled\n", "text/plain; charset=utf-8", status=404
+                    )
+                    return
+                params = parse_qs(parsed.query)
+                self._send_download_payload(report_ai_package_provider(params))
                 return
             if parsed.path == "/report":
                 if report_provider is None:
@@ -221,6 +250,12 @@ class DashboardServer:
         reports_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
         report_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
         report_logs_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
+        report_filtered_logs_provider: Optional[
+            Callable[[Dict[str, list]], Dict[str, Any]]
+        ] = None,
+        report_ai_package_provider: Optional[
+            Callable[[Dict[str, list]], Dict[str, Any]]
+        ] = None,
         sql_provider: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     ) -> None:
         self.host = host
@@ -233,6 +268,8 @@ class DashboardServer:
         self.reports_provider = reports_provider
         self.report_provider = report_provider
         self.report_logs_provider = report_logs_provider
+        self.report_filtered_logs_provider = report_filtered_logs_provider
+        self.report_ai_package_provider = report_ai_package_provider
         self.sql_provider = sql_provider
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -247,6 +284,8 @@ class DashboardServer:
             reports_provider=self.reports_provider,
             report_provider=self.report_provider,
             report_logs_provider=self.report_logs_provider,
+            report_filtered_logs_provider=self.report_filtered_logs_provider,
+            report_ai_package_provider=self.report_ai_package_provider,
             sql_provider=self.sql_provider,
         )
         self._server = ThreadingHTTPServer((self.host, self.port), handler)

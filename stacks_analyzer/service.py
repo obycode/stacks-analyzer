@@ -7,7 +7,7 @@ import time
 import datetime
 import subprocess
 import re
-from typing import Any, Deque, Dict, Optional, Set
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 from .config import ServiceConfig
 from .detector import Alert, Detector
@@ -79,6 +79,12 @@ class MonitoringService:
                 reports_provider=self._reports_api if self.history_store else None,
                 report_provider=self._report_api if self.history_store else None,
                 report_logs_provider=self._report_logs_api if self.history_store else None,
+                report_filtered_logs_provider=(
+                    self._report_filtered_logs_api if self.history_store else None
+                ),
+                report_ai_package_provider=(
+                    self._report_ai_package_api if self.history_store else None
+                ),
                 sql_provider=self._sql_api if self._sql_api_enabled() else None,
             )
 
@@ -335,6 +341,7 @@ class MonitoringService:
                         "severity": alert.severity,
                         "key": alert.key,
                         "message": alert.message,
+                        "readable": self._build_alert_readable(alert),
                     },
                     "snapshot": snapshot,
                     "recent_events": recent_events,
@@ -859,7 +866,190 @@ class MonitoringService:
         except RuntimeError as exc:
             return {"status": 500, "content": "%s\n" % exc}
         filename = "report-%s-logs.txt" % report_id
-        return {"status": 200, "filename": filename, "content": log_text}
+        return {
+            "status": 200,
+            "filename": filename,
+            "content": log_text,
+            "content_type": "text/plain; charset=utf-8",
+        }
+
+    def _report_filtered_logs_api(self, params: Dict[str, list]) -> Dict[str, Any]:
+        base = self._report_logs_api(params)
+        if int(base.get("status", 500)) != 200:
+            return base
+        raw_content = base.get("content", "")
+        if isinstance(raw_content, (bytes, bytearray)):
+            text = raw_content.decode("utf-8", errors="replace")
+        else:
+            text = str(raw_content)
+        filtered = self._filter_p2p_lines(text)
+        report_id = _int_query_param(params, "id", None)
+        filename = "report-%s-logs-filtered.txt" % report_id
+        return {
+            "status": 200,
+            "filename": filename,
+            "content": filtered,
+            "content_type": "text/plain; charset=utf-8",
+        }
+
+    def _report_ai_package_api(self, params: Dict[str, list]) -> Dict[str, Any]:
+        if self.history_store is None:
+            return {"status": 404, "content": "history disabled\n"}
+        report_id = _int_query_param(params, "id", None)
+        if report_id is None:
+            return {"status": 400, "content": "missing report id\n"}
+        report = self.history_store.get_report(report_id)
+        if report is None:
+            return {"status": 404, "content": "report not found\n"}
+
+        default_before = min(
+            int(self.config.history.report_log_window_before_seconds), 180
+        )
+        default_after = min(
+            int(self.config.history.report_log_window_after_seconds), 120
+        )
+        before = _int_query_param(
+            params,
+            "before",
+            default_before,
+        )
+        after = _int_query_param(
+            params,
+            "after",
+            default_after,
+        )
+        max_bytes = _int_query_param(
+            params,
+            "max_bytes",
+            300_000,
+        )
+        before = max(15, min(3600, int(before or default_before)))
+        after = max(15, min(3600, int(after or default_after)))
+        max_bytes = max(50_000, min(2_000_000, int(max_bytes or 300_000)))
+        ts = report.get("ts")
+        filtered_logs = ""
+        filtered_log_clip = {
+            "truncated": False,
+            "strategy": "full",
+            "original_bytes": 0,
+            "kept_bytes": 0,
+        }
+        high_signal_lines: List[str] = []
+        log_status = "not_available"
+        log_error = None
+        alert_payload = (
+            (report.get("data") or {}).get("alert")
+            if isinstance(report.get("data"), dict)
+            else None
+        )
+        signature_hash = self._extract_signature_hash_from_values(
+            (alert_payload or {}).get("key"),
+            (alert_payload or {}).get("message"),
+            report.get("alert_key"),
+            report.get("summary"),
+        )
+        if isinstance(ts, (int, float)) and self.config.mode == "journalctl":
+            start_ts = float(ts) - float(before)
+            end_ts = float(ts) + float(after)
+            try:
+                raw_logs = self._fetch_journal_logs(start_ts, end_ts)
+                filtered_full = self._filter_p2p_lines(raw_logs)
+                filtered_logs, filtered_log_clip = self._compact_log_for_ai(
+                    filtered_full, max_bytes
+                )
+                high_signal_lines = self._select_high_signal_lines(
+                    filtered_full,
+                    signature_hash=signature_hash,
+                    max_lines=120,
+                )
+                log_status = "ok"
+            except RuntimeError as exc:
+                log_status = "error"
+                log_error = str(exc)
+
+        readable = self._build_alert_readable_from_fields(
+            key=(alert_payload or {}).get("key") or report.get("alert_key"),
+            message=(alert_payload or {}).get("message") or report.get("summary"),
+            severity=(alert_payload or {}).get("severity") or report.get("severity"),
+        )
+        report_data = report.get("data") if isinstance(report.get("data"), dict) else {}
+        compact_snapshot = self._select_snapshot_for_ai(report_data.get("snapshot"))
+        compact_timeline = self._compact_proposal_timeline_for_ai(
+            report_data.get("proposal_timeline")
+        )
+        compact_recent_events = self._compact_recent_events_for_ai(
+            report_data.get("recent_events")
+        )
+        compact_recent_alerts = self._compact_recent_alerts_for_ai(
+            report_data.get("recent_alerts")
+        )
+        compact_recent_rejections = self._compact_recent_rejections_for_ai(
+            report_data.get("recent_rejections")
+        )
+        incident = {
+            "report_id": report.get("id"),
+            "ts": report.get("ts"),
+            "severity": report.get("severity"),
+            "alert_key": report.get("alert_key"),
+            "summary": report.get("summary"),
+            "alert": {
+                "ts": (alert_payload or {}).get("ts"),
+                "severity": (alert_payload or {}).get("severity"),
+                "key": (alert_payload or {}).get("key"),
+                "message": (alert_payload or {}).get("message"),
+            },
+        }
+        package = {
+            "format_version": "1.0",
+            "generated_at": time.time(),
+            "purpose": (
+                "Incident package for AI-assisted diagnosis. "
+                "Optimized for model context limits."
+            ),
+            "analysis_questions": [
+                "What happened and in what order?",
+                "What was the most likely root cause?",
+                "What evidence in logs supports that conclusion?",
+                "What was impact scope and duration?",
+                "What should operators check next?",
+            ],
+            "incident": incident,
+            "alert_readable": readable,
+            "context": {
+                "snapshot": compact_snapshot,
+                "proposal_timeline": compact_timeline,
+                "recent_events": compact_recent_events,
+                "recent_alerts": compact_recent_alerts,
+                "recent_rejections": compact_recent_rejections,
+            },
+            "log_window_seconds": {
+                "before": before,
+                "after": after,
+            },
+            "logs": {
+                "status": log_status,
+                "error": log_error,
+                "filtered_no_p2p": filtered_logs,
+                "high_signal_lines": high_signal_lines,
+                "clip": filtered_log_clip,
+            },
+            "notes": {
+                "p2p_filter_rule": "Drop any line containing the substring 'p2p:'",
+                "recommended_first_source": "logs.high_signal_lines",
+                "size_strategy": (
+                    "AI package excludes raw logs and large report/schema blobs; "
+                    "filtered logs are clipped when needed."
+                ),
+            },
+        }
+        filename = "report-%s-ai-package.json" % report_id
+        content = json.dumps(package, indent=2, sort_keys=True) + "\n"
+        return {
+            "status": 200,
+            "filename": filename,
+            "content": content,
+            "content_type": "application/json; charset=utf-8",
+        }
 
     def _fetch_journal_logs(self, start_ts: float, end_ts: float) -> str:
         units = []
@@ -892,6 +1082,364 @@ class MonitoringService:
             % (", ".join(units), start, end)
         )
         return header + result.stdout
+
+    @staticmethod
+    def _filter_p2p_lines(log_text: str) -> str:
+        lines = str(log_text).splitlines()
+        kept = []
+        dropped = 0
+        for line in lines:
+            if "p2p:" in line:
+                dropped += 1
+                continue
+            kept.append(line)
+        summary = (
+            "# filtered lines containing 'p2p:' -> dropped=%d kept=%d\n\n"
+            % (dropped, len(kept))
+        )
+        return summary + "\n".join(kept) + ("\n" if kept else "")
+
+    @staticmethod
+    def _compact_log_for_ai(log_text: str, max_bytes: int) -> Tuple[str, Dict[str, object]]:
+        text = str(log_text)
+        encoded = text.encode("utf-8", errors="replace")
+        total = len(encoded)
+        if total <= max_bytes:
+            return (
+                text,
+                {
+                    "truncated": False,
+                    "strategy": "full",
+                    "original_bytes": total,
+                    "kept_bytes": total,
+                },
+            )
+
+        head_size = max_bytes // 4
+        mid_size = max_bytes // 2
+        tail_size = max_bytes - head_size - mid_size
+        mid_start = max(0, (total - mid_size) // 2)
+        mid_end = min(total, mid_start + mid_size)
+        marker = (
+            "\n\n# --- truncated for AI context limits ---\n\n"
+        ).encode("utf-8")
+        compact = (
+            encoded[:head_size]
+            + marker
+            + encoded[mid_start:mid_end]
+            + marker
+            + encoded[-tail_size:]
+        )
+        compact_text = compact.decode("utf-8", errors="replace")
+        kept = len(compact)
+        return (
+            compact_text,
+            {
+                "truncated": True,
+                "strategy": "head+middle+tail",
+                "original_bytes": total,
+                "kept_bytes": kept,
+            },
+        )
+
+    @staticmethod
+    def _extract_signature_hash_from_values(*values: object) -> Optional[str]:
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            match = re.search(r"([0-9a-f]{64})", value)
+            if match:
+                return match.group(1)
+        return None
+
+    @staticmethod
+    def _select_high_signal_lines(
+        log_text: str,
+        signature_hash: Optional[str] = None,
+        max_lines: int = 180,
+    ) -> List[str]:
+        patterns = (
+            " warn ",
+            " error ",
+            " critical ",
+            "proposal",
+            "threshold",
+            "reject",
+            "accept",
+            "stall",
+            "reorg",
+            "sortition",
+            "tenure",
+            "consensus",
+            "block pushed",
+            "new block event",
+            "mempool iteration",
+        )
+        sig_prefix = signature_hash[:12] if isinstance(signature_hash, str) else None
+        selected: List[str] = []
+        for line in str(log_text).splitlines():
+            lower = line.lower()
+            include = False
+            if signature_hash and signature_hash in line:
+                include = True
+            elif sig_prefix and sig_prefix in line:
+                include = True
+            elif any(pattern in lower for pattern in patterns):
+                include = True
+            if include:
+                clipped = line if len(line) <= 520 else (line[:520] + "...[truncated]")
+                selected.append(clipped)
+                if len(selected) >= max_lines:
+                    break
+        return selected
+
+    @staticmethod
+    def _select_snapshot_for_ai(snapshot: object) -> Dict[str, object]:
+        if not isinstance(snapshot, dict):
+            return {}
+        keys = (
+            "current_bitcoin_block_height",
+            "current_stacks_block_height",
+            "current_consensus_hash",
+            "current_consensus_burn_height",
+            "mempool_ready_txs",
+            "node_tip_age_seconds",
+            "signer_proposal_age_seconds",
+            "avg_block_interval_seconds",
+            "last_block_interval_seconds",
+            "open_proposals_count",
+            "last_tenure_extend_kind",
+            "last_tenure_extend_age_seconds",
+            "active_stalls",
+            "current_miner_pubkey",
+            "current_miner_last_updated_age_seconds",
+            "current_miner_last_updated_ts",
+        )
+        return {key: snapshot.get(key) for key in keys if key in snapshot}
+
+    def _compact_proposal_timeline_for_ai(self, timeline: object) -> Dict[str, object]:
+        if not isinstance(timeline, dict):
+            return {}
+        meta = timeline.get("meta")
+        events = timeline.get("events")
+        out: Dict[str, object] = {}
+        if isinstance(meta, dict):
+            out["meta"] = {
+                key: meta.get(key)
+                for key in (
+                    "signature_hash",
+                    "block_height",
+                    "burn_height",
+                    "consensus_hash",
+                    "block_id",
+                    "related_signature_hashes",
+                )
+                if key in meta
+            }
+        if isinstance(events, list):
+            out["events"] = [
+                self._compact_event_for_ai(item)
+                for item in events[-120:]
+                if isinstance(item, dict)
+            ]
+        return out
+
+    def _compact_recent_events_for_ai(self, events: object) -> List[Dict[str, object]]:
+        if not isinstance(events, list):
+            return []
+        output: List[Dict[str, object]] = []
+        for item in events[-120:]:
+            if isinstance(item, dict):
+                output.append(self._compact_event_for_ai(item))
+        return output
+
+    @staticmethod
+    def _compact_recent_alerts_for_ai(alerts: object) -> List[Dict[str, object]]:
+        if not isinstance(alerts, list):
+            return []
+        output: List[Dict[str, object]] = []
+        for item in alerts[-30:]:
+            if not isinstance(item, dict):
+                continue
+            output.append(
+                {
+                    "ts": item.get("ts"),
+                    "severity": item.get("severity"),
+                    "key": item.get("key"),
+                    "message": item.get("message"),
+                }
+            )
+        return output
+
+    @staticmethod
+    def _compact_recent_rejections_for_ai(rows: object) -> List[Dict[str, object]]:
+        if not isinstance(rows, list):
+            return []
+        keys = (
+            "ts",
+            "signature_hash",
+            "reject_reason",
+            "max_reject_percent",
+            "max_approved_percent",
+            "saw_acceptance",
+            "saw_rejection",
+        )
+        output: List[Dict[str, object]] = []
+        for item in rows[-30:]:
+            if not isinstance(item, dict):
+                continue
+            compact = {key: item.get(key) for key in keys if key in item}
+            output.append(compact)
+        return output
+
+    @staticmethod
+    def _compact_event_for_ai(item: Dict[str, object]) -> Dict[str, object]:
+        data = item.get("data")
+        compact_data: Dict[str, object] = {}
+        if isinstance(data, dict):
+            keep_data_keys = (
+                "signer_signature_hash",
+                "signer_pubkey",
+                "block_id",
+                "block_height",
+                "burn_height",
+                "consensus_hash",
+                "reject_reason",
+                "rejection_reason",
+                "tenure_change_kind",
+                "winner_txid",
+                "percent_approved",
+                "percent_rejected",
+                "total_weight_approved",
+                "total_weight_rejected",
+                "signature_weight",
+                "txid",
+                "stacks_block_hash",
+                "parent_burn_block",
+                "stop_reason",
+                "considered_txs",
+            )
+            for key in keep_data_keys:
+                if key in data:
+                    compact_data[key] = data.get(key)
+        compact: Dict[str, object] = {
+            "ts": item.get("ts"),
+            "source": item.get("source"),
+            "kind": item.get("kind"),
+        }
+        if compact_data:
+            compact["data"] = compact_data
+        line = item.get("line")
+        if isinstance(line, str) and line:
+            compact["line"] = line[:260] + ("...[truncated]" if len(line) > 260 else "")
+        return compact
+
+    def _build_alert_readable(self, alert: Alert) -> Dict[str, str]:
+        return self._build_alert_readable_from_fields(
+            key=alert.key,
+            message=alert.message,
+            severity=alert.severity,
+        )
+
+    def _build_alert_readable_from_fields(
+        self,
+        key: object,
+        message: object,
+        severity: object,
+    ) -> Dict[str, str]:
+        key_text = str(key or "")
+        message_text = str(message or "")
+        severity_text = str(severity or "info").lower()
+
+        title = "Network event"
+        description = (
+            "The analyzer detected an event that may require operator review."
+        )
+        if key_text.startswith("proposal-timeout-boundary-"):
+            title = "Proposal delayed around burn-block boundary"
+            description = (
+                "The proposal stayed unresolved long enough to trigger a timeout, "
+                "and logs indicate burn-block boundary timing likely split signer decisions."
+            )
+        elif key_text.startswith("proposal-timeout-"):
+            title = "Proposal did not finalize in time"
+            description = (
+                "A proposal remained in progress past the timeout window without reaching "
+                "the 70% approval threshold."
+            )
+        elif key_text.startswith("proposal-reject-boundary-"):
+            title = "Proposal rejected near burn-block boundary"
+            description = (
+                "Signers likely observed different burn-chain states around a new burn block, "
+                "causing enough rejections to finalize the proposal as rejected."
+            )
+        elif key_text.startswith("signer-reject-"):
+            title = "Signer rejection observed"
+            description = (
+                "One or more signer responses explicitly rejected a proposal. "
+                "Check the rejection reason and whether it correlates with burn-block timing."
+            )
+        elif key_text.startswith("signer-accept-then-reject-"):
+            title = "Inconsistent signer response order"
+            description = (
+                "At least one signer appears to have accepted and then rejected the same proposal, "
+                "which is considered a critical consistency signal."
+            )
+        elif key_text.startswith("node-stall"):
+            title = "Node tip progression stalled"
+            description = (
+                "The node did not advance to a new tip within the expected interval."
+            )
+        elif key_text.startswith("signer-stall"):
+            title = "Signer proposal flow stalled"
+            description = (
+                "No new signer proposal activity was seen within the expected interval."
+            )
+        elif key_text.startswith("burn-block-"):
+            title = "New burn block observed"
+            description = (
+                "A new burn block reached consensus; this report captures sortition and miner context."
+            )
+        elif key_text.startswith("tenure-extend-"):
+            title = "Tenure extend observed"
+            description = (
+                "A tenure extend transaction was observed. Review extend kind and subsequent block flow."
+            )
+        elif key_text.startswith("burnchain-reorg-"):
+            title = "Burnchain reorg detected"
+            description = (
+                "The burnchain reorganized to a different branch. Validate post-reorg miner and proposal behavior."
+            )
+        elif key_text.startswith("large-signer-participation-"):
+            title = "Signer participation drop detected"
+            description = (
+                "A signer with notable weight had significantly lower participation in recent blocks."
+            )
+        elif key_text.startswith("sortition-parent-burn-mismatch-"):
+            title = "Sortition winner parent-burn mismatch"
+            description = (
+                "The winning commit references a parent burn block that does not match the latest accepted proposal burn block."
+            )
+        elif key_text.startswith("mempool-iteration-deadline"):
+            title = "Miner mempool iteration hit deadline"
+            description = (
+                "Mempool iteration stopped due to DeadlineReached instead of NoMoreCandidates, "
+                "which can indicate mining pressure."
+            )
+
+        if severity_text == "critical":
+            severity_hint = "Critical: immediate investigation recommended."
+        elif severity_text == "warning":
+            severity_hint = "Warning: investigate soon."
+        else:
+            severity_hint = "Info: monitor and correlate with nearby events."
+        return {
+            "title": title,
+            "description": description,
+            "severity_hint": severity_hint,
+            "raw_message": message_text,
+            "key": key_text,
+        }
 
     def _sql_api(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if self.history_store is None or not self._sql_api_enabled():

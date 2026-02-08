@@ -205,6 +205,24 @@
       border-collapse: collapse;
       font-size: 13px;
     }
+    .reports-table {
+      table-layout: fixed;
+    }
+    .reports-table col.col-time {
+      width: 170px;
+    }
+    .reports-table col.col-severity {
+      width: 140px;
+    }
+    .reports-table col.col-report {
+      width: 90px;
+    }
+    .reports-table th:nth-child(3),
+    .reports-table td:nth-child(3) {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     th, td {
       text-align: left;
       padding: 8px 6px;

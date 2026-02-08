@@ -99,6 +99,27 @@
       text-align: right;
       min-width: 180px;
     }
+    .downloads-box {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(8, 16, 24, 0.45);
+      padding: 8px 10px;
+      min-width: 220px;
+    }
+    .downloads-title {
+      font-size: 10px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 6px;
+      text-align: left;
+    }
+    .downloads-list {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
     .report-section .card-title {
       display: flex;
       justify-content: space-between;
@@ -170,6 +191,22 @@
       letter-spacing: 0.06em;
       text-transform: uppercase;
     }
+    .btn-download {
+      padding: 4px 9px;
+      font-size: 11px;
+      letter-spacing: 0.03em;
+      text-transform: none;
+      border-radius: 10px;
+      gap: 5px;
+      white-space: nowrap;
+    }
+    .btn-icon {
+      display: inline-block;
+      width: 12px;
+      text-align: center;
+      line-height: 1;
+      opacity: 0.95;
+    }
     .btn:hover {
       background: rgba(56, 189, 248, 0.28);
     }
@@ -230,5 +267,6 @@
       .report-columns { grid-template-columns: 1fr; }
       .report-hero { flex-direction: column; }
       .report-actions { align-items: flex-start; text-align: left; }
+      .downloads-list { justify-content: flex-start; }
       .kv { grid-template-columns: 1fr; }
     }

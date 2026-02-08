@@ -700,13 +700,35 @@
           const sevClass = "sev sev-" + (sev === "warning" ? "warning" : sev === "critical" ? "critical" : sev === "info" ? "info" : "ok");
           const reportId = item.report_id;
           const reportLink = reportId ? linkTo("/report?id=" + encodeURIComponent(reportId), "view", false) : "-";
-          return "<tr><td>" + escapeHtml(new Date(item.ts * 1000).toLocaleTimeString()) + "</td><td><span class='" + sevClass + "'>" + escapeHtml(sev) + "</span></td><td>" + escapeHtml(item.alert_key || "-") + "</td><td>" + reportLink + "</td></tr>";
+          const alertTitle = humanReadableReportAlertTitle(item);
+          return "<tr><td>" + escapeHtml(new Date(item.ts * 1000).toLocaleTimeString()) + "</td><td><span class='" + sevClass + "'>" + escapeHtml(sev) + "</span></td><td title='" + escapeAttr(alertTitle) + "'>" + escapeHtml(alertTitle) + "</td><td>" + reportLink + "</td></tr>";
         }).join("");
       }
 
       pageLabel.textContent = "Page " + (reportsPage + 1) + "/" + totalPages;
       prevBtn.disabled = reportsPage <= 0;
       nextBtn.disabled = reportsPage >= totalPages - 1;
+    }
+
+    function humanReadableReportAlertTitle(item) {
+      if (item && item.summary) {
+        return String(item.summary);
+      }
+      const key = String((item && item.alert_key) || "");
+      if (key.startsWith("proposal-timeout-boundary-")) return "Proposal delayed near burn-block boundary";
+      if (key.startsWith("proposal-timeout-")) return "Proposal did not finalize in time";
+      if (key.startsWith("proposal-reject-boundary-")) return "Proposal rejected near burn-block boundary";
+      if (key.startsWith("signer-reject-")) return "Signer rejection observed";
+      if (key.startsWith("signer-accept-then-reject-")) return "Inconsistent signer response order";
+      if (key.startsWith("node-stall")) return "Node tip progression stalled";
+      if (key.startsWith("signer-stall")) return "Signer proposal flow stalled";
+      if (key.startsWith("burn-block-")) return "New burn block observed";
+      if (key.startsWith("tenure-extend-")) return "Tenure extend observed";
+      if (key.startsWith("burnchain-reorg-")) return "Burnchain reorg detected";
+      if (key.startsWith("large-signer-participation-")) return "Signer participation drop detected";
+      if (key.startsWith("sortition-parent-burn-mismatch-")) return "Sortition parent-burn mismatch";
+      if (key.startsWith("mempool-iteration-deadline")) return "Miner mempool iteration hit deadline";
+      return key || "-";
     }
 
     function render(data) {

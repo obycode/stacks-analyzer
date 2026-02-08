@@ -16,6 +16,56 @@
       return "<a class='link' href='" + url + "'>" + label + "</a>";
     }
 
+    function humanReadableAlertFallback(alert) {
+      const key = String((alert && alert.key) || "");
+      const severity = String((alert && alert.severity) || "info").toLowerCase();
+      let title = "Network event detected";
+      let description = "The analyzer detected an event that may require review.";
+      if (key.startsWith("proposal-timeout-boundary-")) {
+        title = "Proposal delayed near burn-block boundary";
+        description =
+          "This proposal timed out while signers were likely split around a new burn block.";
+      } else if (key.startsWith("proposal-timeout-")) {
+        title = "Proposal did not finalize in time";
+        description =
+          "The proposal stayed in progress and did not reach the 70% approval threshold in time.";
+      } else if (key.startsWith("proposal-reject-boundary-")) {
+        title = "Proposal rejected near burn-block boundary";
+        description =
+          "Signer rejections likely came from differing burn-chain views at boundary timing.";
+      } else if (key.startsWith("signer-reject-")) {
+        title = "Signer rejection observed";
+        description = "One or more signer responses rejected a proposal.";
+      } else if (key.startsWith("signer-accept-then-reject-")) {
+        title = "Inconsistent signer response order";
+        description = "A signer appears to have accepted and then rejected the same proposal.";
+      } else if (key.startsWith("node-stall")) {
+        title = "Node tip progression stalled";
+        description = "The node did not advance to a new tip in the expected interval.";
+      } else if (key.startsWith("signer-stall")) {
+        title = "Signer proposal flow stalled";
+        description = "No signer proposal activity was seen in the expected interval.";
+      } else if (key.startsWith("burnchain-reorg-")) {
+        title = "Burnchain reorg detected";
+        description = "The burnchain switched branches and may affect downstream behavior.";
+      } else if (key.startsWith("mempool-iteration-deadline")) {
+        title = "Miner mempool iteration hit deadline";
+        description =
+          "Mempool iteration ended by deadline rather than exhausting candidates.";
+      }
+      const severityHint =
+        severity === "critical"
+          ? "Critical: immediate investigation recommended."
+          : severity === "warning"
+          ? "Warning: investigate soon."
+          : "Info: monitor and correlate with nearby events.";
+      return {
+        title,
+        description,
+        severity_hint: severityHint,
+      };
+    }
+
     function shortHash(value, chars) {
       if (!value) return "-";
       const text = String(value);
@@ -81,16 +131,30 @@
       }
       const alert = report.data && report.data.alert ? report.data.alert : {};
       const summary = report.summary || "-";
+      const readable =
+        alert.readable && typeof alert.readable === "object"
+          ? alert.readable
+          : humanReadableAlertFallback(alert);
       document.getElementById("summaryCard").innerHTML =
         "<div>" +
         "<div class='muted'>Alert Report</div>" +
-        "<div class='summary-title'>" + escapeHtml(summary) + "</div>" +
+        "<div class='summary-title'>" + escapeHtml(readable.title || summary) + "</div>" +
+        "<div class='summary-meta'>" + escapeHtml(readable.description || "") + "</div>" +
+        "<div class='summary-meta'>" + escapeHtml(readable.severity_hint || "") + "</div>" +
+        "<div class='summary-meta'>Raw alert: " + escapeHtml(summary) + "</div>" +
         "<div class='summary-meta'>Key: " + escapeHtml(alert.key || report.alert_key || "-") + "</div>" +
         "</div>" +
         "<div class='report-actions'>" +
         "<div class='" + sevClass(alert.severity || report.severity) + "'>" + escapeHtml(alert.severity || report.severity) + "</div>" +
         "<div class='summary-meta'>Time: " + escapeHtml(fmtTime(report.ts)) + "</div>" +
-        "<a class='btn' href='/api/report-logs?id=" + encodeURIComponent(report.id) + "'>Download Logs</a>" +
+        "<div class='downloads-box'>" +
+        "<div class='downloads-title'>Downloads</div>" +
+        "<div class='downloads-list'>" +
+        "<a class='btn btn-download' href='/api/report-logs?id=" + encodeURIComponent(report.id) + "'><span class='btn-icon' aria-hidden='true'>&#8681;</span><span>Raw logs</span></a>" +
+        "<a class='btn btn-download' href='/api/report-filtered-logs?id=" + encodeURIComponent(report.id) + "'><span class='btn-icon' aria-hidden='true'>&#8681;</span><span>Filtered</span></a>" +
+        "<a class='btn btn-download' href='/api/report-ai-package?id=" + encodeURIComponent(report.id) + "'><span class='btn-icon' aria-hidden='true'>&#8681;</span><span>AI package</span></a>" +
+        "</div>" +
+        "</div>" +
         "</div>";
 
       const proposalTimeline = report.data && report.data.proposal_timeline ? report.data.proposal_timeline : null;
