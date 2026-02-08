@@ -52,6 +52,10 @@
         title = "Miner mempool iteration hit deadline";
         description =
           "Mempool iteration ended by deadline rather than exhausting candidates.";
+      } else if (key.startsWith("mempool-empty")) {
+        title = "Mempool has stayed empty";
+        description =
+          "No transactions were ready to mine for an extended period.";
       }
       const severityHint =
         severity === "critical"

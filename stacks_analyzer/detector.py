@@ -19,6 +19,7 @@ EXECUTION_COST_LIMITS = {
     "read_len": 100_000_000,
     "read_cnt": 15_000,
 }
+MEMPOOL_EMPTY_ALERT_SECONDS = 90
 
 
 @dataclass
@@ -921,6 +922,7 @@ class Detector:
         self._trim_closed_proposals(ts)
         self._trim_recent_rejections(ts)
         self._detect_stalls(ts, alerts)
+        self._detect_mempool_empty(ts, alerts)
         self._detect_proposal_timeouts(ts, alerts)
         self._detect_large_signer_participation(ts, alerts)
 
@@ -1030,6 +1032,27 @@ class Detector:
                     ts=ts,
                     severity="critical",
                 )
+
+    def _detect_mempool_empty(self, ts: float, alerts: List[Alert]) -> None:
+        if self.last_mempool_stop_reason != "NoMoreCandidates":
+            return
+        if self.last_mempool_ready_txs != 0:
+            return
+        if self.last_mempool_ready_ts is None:
+            return
+        gap = ts - self.last_mempool_ready_ts
+        if gap <= MEMPOOL_EMPTY_ALERT_SECONDS:
+            return
+        self._emit_alert(
+            alerts=alerts,
+            key="mempool-empty",
+            severity="warning",
+            message=(
+                "Mempool has had 0 ready transactions for %.0fs (threshold=%ds)"
+                % (gap, MEMPOOL_EMPTY_ALERT_SECONDS)
+            ),
+            ts=ts,
+        )
 
     def _detect_proposal_timeouts(self, ts: float, alerts: List[Alert]) -> None:
         for signature_hash, state in list(self.proposals.items()):

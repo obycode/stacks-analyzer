@@ -22,6 +22,23 @@ class TestDetector(unittest.TestCase):
         self.assertIn("node-stall", keys)
         self.assertIn("signer-stall", keys)
 
+    def test_mempool_empty_alert_after_90s(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.last_mempool_stop_reason = "NoMoreCandidates"
+        detector.last_mempool_ready_txs = 0
+        detector.last_mempool_ready_ts = 100.0
+
+        alerts, _ = detector.tick(now=190.0)
+        self.assertFalse(any(alert.key == "mempool-empty" for alert in alerts))
+
+        alerts, _ = detector.tick(now=191.0)
+        self.assertTrue(any(alert.key == "mempool-empty" for alert in alerts))
+
     def test_avg_block_interval_from_node_tips(self) -> None:
         detector = Detector(
             DetectorConfig(

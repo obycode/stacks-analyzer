@@ -835,6 +835,7 @@
       if (key.startsWith("large-signer-participation-")) return "Signer participation drop detected";
       if (key.startsWith("sortition-parent-burn-mismatch-")) return "Sortition parent-burn mismatch";
       if (key.startsWith("mempool-iteration-deadline")) return "Miner mempool iteration hit deadline";
+      if (key.startsWith("mempool-empty")) return "Mempool has stayed empty";
       return key || "-";
     }
 

@@ -1426,6 +1426,12 @@ class MonitoringService:
                 "Mempool iteration stopped due to DeadlineReached instead of NoMoreCandidates, "
                 "which can indicate mining pressure."
             )
+        elif key_text.startswith("mempool-empty"):
+            title = "Mempool has stayed empty"
+            description = (
+                "No transactions were ready to mine for an extended period. "
+                "This often indicates low demand rather than a node failure."
+            )
 
         if severity_text == "critical":
             severity_hint = "Critical: immediate investigation recommended."
