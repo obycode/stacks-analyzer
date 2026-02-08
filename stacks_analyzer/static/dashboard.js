@@ -247,15 +247,15 @@
     function tenureChangeStyle(kind) {
       const text = String(kind || "").toLowerCase();
       if (text.includes("extendread")) {
-        return { color: "#c4b5fd", dash: "3 2", label: "ExtendReadCount" };
+        return { color: "#a855f7", dash: "3 3", label: "ExtendReadCount" };
       }
       if (text.includes("extendall")) {
-        return { color: "#fde68a", dash: "3 2", label: "ExtendAll" };
+        return { color: "#f59e0b", dash: "8 3", label: "ExtendAll" };
       }
       if (text.includes("blockfound")) {
         return { color: "#f97316", dash: "", label: "BlockFound" };
       }
-      return { color: "#94a3b8", dash: "1 2", label: String(kind || "TenureChange") };
+      return { color: "#94a3b8", dash: "4 3", label: String(kind || "TenureChange") };
     }
 
     function renderExecutionCostTrend(svgId, samples, tenureChanges) {
@@ -321,11 +321,31 @@
               yForPct(0).toFixed(2) +
               "' stroke='" +
               style.color +
-              "' stroke-width='1.0'" +
+              "' stroke-width='6.0' opacity='0.16'></line>" +
+              "<line x1='" +
+              x.toFixed(2) +
+              "' x2='" +
+              x.toFixed(2) +
+              "' y1='" +
+              yForPct(100).toFixed(2) +
+              "' y2='" +
+              yForPct(0).toFixed(2) +
+              "' stroke='" +
+              style.color +
+              "' stroke-width='2.2'" +
               dashAttr +
-              " opacity='0.9'><title>" +
+              " opacity='1.0'><title>" +
               escapeHtml(title) +
-              "</title></line>"
+              "</title></line>" +
+              "<circle cx='" +
+              x.toFixed(2) +
+              "' cy='" +
+              yForPct(100).toFixed(2) +
+              "' r='2.8' fill='" +
+              style.color +
+              "' stroke='rgba(2, 6, 23, 0.9)' stroke-width='0.9'><title>" +
+              escapeHtml(title) +
+              "</title></circle>"
             );
           })
           .join("");
@@ -477,7 +497,18 @@
                 markerY.toFixed(2) +
                 "' stroke='" +
                 style.color +
-                "' stroke-width='1.2'" +
+                "' stroke-width='6.0' opacity='0.2'></line>" +
+                "<line x1='" +
+                x.toFixed(2) +
+                "' x2='" +
+                (x + barWidth).toFixed(2) +
+                "' y1='" +
+                markerY.toFixed(2) +
+                "' y2='" +
+                markerY.toFixed(2) +
+                "' stroke='" +
+                style.color +
+                "' stroke-width='2.6'" +
                 dashAttr +
                 "><title>" +
                 escapeHtml(markerTitle) +

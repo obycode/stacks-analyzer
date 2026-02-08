@@ -116,9 +116,9 @@
     }
     .legend-line {
       display: inline-block;
-      width: 14px;
+      width: 20px;
       height: 0;
-      border-top: 2px dashed currentColor;
+      border-top: 3px dashed currentColor;
       margin-right: 4px;
       vertical-align: middle;
       transform: translateY(-1px);
