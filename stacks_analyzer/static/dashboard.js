@@ -155,13 +155,45 @@
         .slice()
         .sort((a, b) => Number(a.ts) - Number(b.ts));
       if (!all.length) return;
-      const nodeOnly = all.filter((item) => item.source === "node");
-      const source = nodeOnly.length >= 2 ? nodeOnly : all;
+      const byBlock = new Map();
+      for (const item of all) {
+        let key = null;
+        const blockHeight = Number(item && item.block_height);
+        if (Number.isFinite(blockHeight)) {
+          key = "h:" + blockHeight + ":" + String((item && item.consensus_hash) || "");
+        } else if (item && item.block_id) {
+          key = "id:" + String(item.block_id);
+        } else if (item && item.block_header_hash) {
+          key = "hdr:" + String(item.block_header_hash);
+        } else if (item && item.consensus_hash) {
+          key = "c:" + String(item.consensus_hash) + ":" + String(Math.floor(Number(item.ts)));
+        }
+        if (!key) continue;
+        const existing = byBlock.get(key);
+        if (!existing) {
+          byBlock.set(key, item);
+          continue;
+        }
+        const existingIsNode = existing.source === "node";
+        const itemIsNode = item.source === "node";
+        if (!existingIsNode && itemIsNode) {
+          byBlock.set(key, item);
+          continue;
+        }
+        if (existingIsNode === itemIsNode && Number(item.ts) < Number(existing.ts)) {
+          byBlock.set(key, item);
+        }
+      }
+      const deduped = Array.from(byBlock.values()).sort(
+        (a, b) => Number(a.ts) - Number(b.ts)
+      );
+      const nodeOnly = deduped.filter((item) => item.source === "node");
+      const source = nodeOnly.length >= 2 ? nodeOnly : deduped;
       for (let i = 1; i < source.length; i += 1) {
         const prevTs = Number(source[i - 1].ts);
         const ts = Number(source[i].ts);
         const interval = ts - prevTs;
-        if (Number.isFinite(interval) && interval > 0 && interval <= 600) {
+        if (Number.isFinite(interval) && interval >= 0.25 && interval <= 600) {
           pushHistory(
             blockCadenceHistory,
             {
