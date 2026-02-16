@@ -117,6 +117,32 @@
       return Math.round(value).toString();
     }
 
+    function formatStxFromMicro(micro) {
+      if (!Number.isFinite(Number(micro))) return "-";
+      const stx = Number(micro) / 1_000_000;
+      if (stx >= 1000) return stx.toLocaleString(undefined, { maximumFractionDigits: 1 }) + " STX";
+      if (stx >= 10) return stx.toFixed(1) + " STX";
+      return stx.toFixed(3) + " STX";
+    }
+
+    function formatTxMix(counts) {
+      const safe = counts && typeof counts === "object" ? counts : {};
+      const pairs = [
+        ["transfer", "transfer"],
+        ["contract_call", "call"],
+        ["contract_deploy", "deploy"],
+        ["coinbase", "coinbase"],
+        ["tenure_change", "tenure-change"],
+        ["other", "other"],
+      ];
+      return pairs
+        .map(([key, label]) => {
+          const value = Number(safe[key]) || 0;
+          return label + " " + value.toLocaleString(undefined);
+        })
+        .join(" | ");
+    }
+
     function formatWindowTick(seconds) {
       if (!Number.isFinite(seconds) || seconds <= 0) return "now";
       if (seconds < 60) return Math.round(seconds) + "s";
@@ -496,17 +522,12 @@
 
       const orderedTenures = tenuresRaw
         .slice()
-        .filter((item) => {
-          if (!item || typeof item !== "object") return false;
-          const count = Number(item.block_count);
-          return Number.isFinite(count) && count > 0;
-        })
+        .filter((item) => item && typeof item === "object" && Number.isFinite(Number(item.block_count)))
         .sort((a, b) => Number(a.start_ts || 0) - Number(b.start_ts || 0));
       if (!orderedTenures.length) {
         svg.innerHTML = "";
         return;
       }
-
       const windowTenures = orderedTenures.slice(-8);
       if (!windowTenures.length) {
         svg.innerHTML = "";
@@ -518,27 +539,6 @@
         .filter((item) => Number.isFinite(Number(item && item.ts)))
         .sort((a, b) => Number(a.ts) - Number(b.ts));
 
-      for (const tenure of windowTenures) {
-        const markers = [];
-        const startTs = Number(tenure.start_ts || 0);
-        const endTs = Number(tenure.end_ts || startTs);
-        for (const change of changeEvents) {
-          const ts = Number(change.ts);
-          if (ts < startTs || ts > endTs) continue;
-          let ratio = 0.5;
-          if (Number.isFinite(startTs) && Number.isFinite(endTs) && endTs > startTs) {
-            ratio = (ts - startTs) / (endTs - startTs);
-          }
-          ratio = Math.max(0, Math.min(1, ratio));
-          markers.push({
-            kind: String(change.kind || "unknown"),
-            ts,
-            ratio,
-          });
-        }
-        tenure.markers = markers;
-      }
-
       const rect = svg.getBoundingClientRect();
       const width = Math.max(180, Math.round(rect.width || svg.clientWidth || 0));
       const height = Math.max(64, Math.round(rect.height || svg.clientHeight || 0));
@@ -546,64 +546,115 @@
       svg.setAttribute("preserveAspectRatio", "xMinYMin meet");
 
       const topPad = 8;
-      const rightPad = 8;
+      const rightPad = 36;
       const bottomPad = 16;
-      const leftPad = 26;
+      const leftPad = 30;
       const plotWidth = width - leftPad - rightPad;
       const plotHeight = height - topPad - bottomPad;
 
       const tenureCount = windowTenures.length;
-      const maxTotal = Math.max(1, ...windowTenures.map((item) => Number(item.block_count) || 0));
-      const yForCount = (count) => height - bottomPad - (Math.max(0, Number(count) || 0) / maxTotal) * plotHeight;
+      const maxTxs = Math.max(1, ...windowTenures.map((item) => Number(item.tx_count_total) || 0));
+      const maxCount = Math.max(maxTxs, 1);
+      const maxFeeMicro = Math.max(0, ...windowTenures.map((item) => Number(item.fee_microstx_total) || 0));
+      const maxFeeStx = maxFeeMicro > 0 ? maxFeeMicro / 1_000_000 : 1;
+      const yForCount = (count) =>
+        height - bottomPad - (Math.max(0, Number(count) || 0) / maxCount) * plotHeight;
+      const yForFee = (feeMicro) =>
+        height - bottomPad - ((Math.max(0, Number(feeMicro) || 0) / 1_000_000) / maxFeeStx) * plotHeight;
       const slotWidth = plotWidth / Math.max(1, tenureCount);
-      const barWidth = Math.max(10, slotWidth - 8);
+      const groupWidth = Math.max(16, slotWidth - 8);
+      const barWidth = Math.max(8, groupWidth * 0.66);
 
       const bars = windowTenures
         .map((tenure, idx) => {
-          const x = leftPad + idx * slotWidth + (slotWidth - barWidth) / 2;
-          const yTop = yForCount(tenure.block_count);
+          const slotX = leftPad + idx * slotWidth;
+          const xGroup = slotX + (slotWidth - groupWidth) / 2;
+          const xBar = xGroup + (groupWidth - barWidth) / 2;
+          const xCenter = slotX + slotWidth / 2;
+          const blockCount = Number(tenure.block_count) || 0;
+          const txCount = Number(tenure.tx_count_total) || 0;
+          const feeMicro = Number(tenure.fee_microstx_total) || 0;
+          const yTxTop = yForCount(txCount);
           const yBottom = yForCount(0);
           const hashLabel = tenure.consensus_hash === "unknown" ? "unknown" : shortHash(tenure.consensus_hash, 10);
+          const typeCounts = tenure.tx_type_counts || {};
+          const typeSummary = [
+            "transfer=" + String(typeCounts.transfer || 0),
+            "call=" + String(typeCounts.contract_call || 0),
+            "deploy=" + String(typeCounts.contract_deploy || 0),
+            "coinbase=" + String(typeCounts.coinbase || 0),
+            "tenure_change=" + String(typeCounts.tenure_change || 0),
+          ].join(", ");
           const tooltip =
             "tenure " +
             hashLabel +
             " | blocks " +
-            tenure.block_count +
+            blockCount +
+            " | txs " +
+            txCount +
+            " | fees " +
+            formatStxFromMicro(feeMicro) +
             " | start " +
             fmtWallClock(tenure.start_ts) +
             " | end " +
-            fmtWallClock(tenure.end_ts);
-          const markers = (tenure.markers || [])
-            .map((marker) => {
-              const markerRatio = Math.max(0, Math.min(1, Number(marker.ratio) || 0));
-              const markerY = yBottom - markerRatio * (yBottom - yTop);
-              const style = tenureChangeStyle(marker.kind);
+            fmtWallClock(tenure.end_ts) +
+            " | tx types [" +
+            typeSummary +
+            "]";
+
+          const markers = changeEvents
+            .map((change) => {
+              const ts = Number(change.ts);
+              const startTs = Number(tenure.start_ts || 0);
+              const nextStartTs = Number(
+                idx < windowTenures.length - 1 ? windowTenures[idx + 1].start_ts : NaN
+              );
+              const fallbackEndTs = Number(tenure.end_ts || startTs);
+              const hasNextStart =
+                Number.isFinite(nextStartTs) && nextStartTs > startTs;
+              if (hasNextStart) {
+                if (ts < startTs || ts >= nextStartTs) return "";
+              } else if (ts < startTs || ts > fallbackEndTs) {
+                return "";
+              }
+              let ratio = 0.5;
+              const intervalEndTs = hasNextStart ? nextStartTs : fallbackEndTs;
+              if (
+                Number.isFinite(startTs) &&
+                Number.isFinite(intervalEndTs) &&
+                intervalEndTs > startTs
+              ) {
+                ratio = (ts - startTs) / (intervalEndTs - startTs);
+              }
+              ratio = Math.max(0, Math.min(1, ratio));
+              const markerY = yBottom - ratio * (yBottom - yTxTop);
+              const style = tenureChangeStyle(change.kind);
               const markerTitle =
-                "Tenure change: " + style.label + " at " + fmtWallClock(marker.ts);
+                "Tenure change: " + style.label + " at " + fmtWallClock(ts);
               const dashAttr = style.dash ? " stroke-dasharray='" + style.dash + "'" : "";
               return (
                 "<line x1='" +
-                x.toFixed(2) +
+                xBar.toFixed(2) +
                 "' x2='" +
-                (x + barWidth).toFixed(2) +
+                (xBar + barWidth).toFixed(2) +
                 "' y1='" +
                 markerY.toFixed(2) +
                 "' y2='" +
                 markerY.toFixed(2) +
                 "' stroke='" +
                 style.color +
-                "' stroke-width='6.0' opacity='0.2'></line>" +
+                "' stroke-width='4.6' opacity='0.2'></line>" +
                 "<line x1='" +
-                x.toFixed(2) +
+                xBar.toFixed(2) +
                 "' x2='" +
-                (x + barWidth).toFixed(2) +
+                (xBar + barWidth).toFixed(2) +
                 "' y1='" +
                 markerY.toFixed(2) +
                 "' y2='" +
                 markerY.toFixed(2) +
                 "' stroke='" +
                 style.color +
-                "' stroke-width='2.6'" +
+                "' stroke-width='2.0'" +
                 dashAttr +
                 "><title>" +
                 escapeHtml(markerTitle) +
@@ -611,22 +662,23 @@
               );
             })
             .join("");
+
           const xLabel = tenure.consensus_hash === "unknown" ? "?" : tenure.consensus_hash.slice(0, 6);
           return (
             "<rect x='" +
-            x.toFixed(2) +
+            xBar.toFixed(2) +
             "' y='" +
-            yTop.toFixed(2) +
+            yTxTop.toFixed(2) +
             "' width='" +
             barWidth.toFixed(2) +
             "' height='" +
-            Math.max(1, yBottom - yTop).toFixed(2) +
-            "' fill='rgba(56, 189, 248, 0.35)' stroke='rgba(56, 189, 248, 0.95)' stroke-width='0.9'><title>" +
+            Math.max(1, yBottom - yTxTop).toFixed(2) +
+            "' fill='rgba(34, 211, 238, 0.30)' stroke='rgba(34, 211, 238, 0.95)' stroke-width='0.9'><title>" +
             escapeHtml(tooltip) +
             "</title></rect>" +
             markers +
             "<text class='chart-axis' x='" +
-            (x + barWidth / 2).toFixed(2) +
+            xCenter.toFixed(2) +
             "' y='" +
             (height - 2) +
             "' text-anchor='middle' fill='#94a3b8'>" +
@@ -636,16 +688,49 @@
         })
         .join("");
 
-      const grid =
-        "<line x1='" + leftPad + "' x2='" + leftPad + "' y1='" + yForCount(maxTotal) + "' y2='" + yForCount(0) + "' stroke='rgba(148, 163, 184, 0.24)' stroke-width='0.6' />" +
-        "<line x1='" + leftPad + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForCount(maxTotal) + "' y2='" + yForCount(maxTotal) + "' stroke='rgba(148, 163, 184, 0.2)' stroke-width='0.6' />" +
-        "<line x1='" + leftPad + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForCount(maxTotal / 2) + "' y2='" + yForCount(maxTotal / 2) + "' stroke='rgba(148, 163, 184, 0.16)' stroke-width='0.6' />" +
-        "<line x1='" + leftPad + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForCount(0) + "' y2='" + yForCount(0) + "' stroke='rgba(148, 163, 184, 0.2)' stroke-width='0.6' />" +
-        "<text class='chart-axis' x='6' y='" + (yForCount(maxTotal) + 3) + "' fill='#94a3b8'>" + maxTotal + "</text>" +
-        "<text class='chart-axis' x='10' y='" + (yForCount(maxTotal / 2) + 3) + "' fill='#94a3b8'>" + Math.round(maxTotal / 2) + "</text>" +
-        "<text class='chart-axis' x='14' y='" + (yForCount(0) + 3) + "' fill='#94a3b8'>0</text>";
+      const feePoints = windowTenures.map((tenure, idx) => {
+        const slotX = leftPad + idx * slotWidth;
+        const centerX = slotX + slotWidth / 2;
+        return [centerX, yForFee(tenure.fee_microstx_total)];
+      });
+      const feePath = feePoints
+        .map((pt, idx) => (idx === 0 ? "M" : "L") + pt[0].toFixed(2) + " " + pt[1].toFixed(2))
+        .join(" ");
+      const feeLine =
+        "<path d='" +
+        feePath +
+        "' fill='none' stroke='rgba(245, 158, 11, 0.95)' stroke-width='1.4'></path>" +
+        feePoints
+          .map((pt, idx) => {
+            const feeMicro = Number(windowTenures[idx].fee_microstx_total) || 0;
+            return (
+              "<circle cx='" +
+              pt[0].toFixed(2) +
+              "' cy='" +
+              pt[1].toFixed(2) +
+              "' r='1.9' fill='rgba(245, 158, 11, 1)'><title>fees " +
+              escapeHtml(formatStxFromMicro(feeMicro)) +
+              "</title></circle>"
+            );
+          })
+          .join("");
 
-      svg.innerHTML = grid + bars;
+      const feeTopLabel = formatStxFromMicro(maxFeeMicro).replace(" STX", "");
+      const feeMidLabel = formatStxFromMicro(maxFeeMicro / 2).replace(" STX", "");
+      const grid =
+        "<line x1='" + leftPad + "' x2='" + leftPad + "' y1='" + yForCount(maxCount) + "' y2='" + yForCount(0) + "' stroke='rgba(148, 163, 184, 0.24)' stroke-width='0.6' />" +
+        "<line x1='" + (leftPad + plotWidth) + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForFee(maxFeeMicro) + "' y2='" + yForFee(0) + "' stroke='rgba(148, 163, 184, 0.24)' stroke-width='0.6' />" +
+        "<line x1='" + leftPad + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForCount(maxCount) + "' y2='" + yForCount(maxCount) + "' stroke='rgba(148, 163, 184, 0.2)' stroke-width='0.6' />" +
+        "<line x1='" + leftPad + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForCount(maxCount / 2) + "' y2='" + yForCount(maxCount / 2) + "' stroke='rgba(148, 163, 184, 0.16)' stroke-width='0.6' />" +
+        "<line x1='" + leftPad + "' x2='" + (leftPad + plotWidth) + "' y1='" + yForCount(0) + "' y2='" + yForCount(0) + "' stroke='rgba(148, 163, 184, 0.2)' stroke-width='0.6' />" +
+        "<text class='chart-axis' x='6' y='" + (yForCount(maxCount) + 3) + "' fill='#94a3b8'>" + Math.round(maxCount) + "</text>" +
+        "<text class='chart-axis' x='10' y='" + (yForCount(maxCount / 2) + 3) + "' fill='#94a3b8'>" + Math.round(maxCount / 2) + "</text>" +
+        "<text class='chart-axis' x='14' y='" + (yForCount(0) + 3) + "' fill='#94a3b8'>0</text>" +
+        "<text class='chart-axis' x='" + (leftPad + plotWidth + 2) + "' y='" + (yForFee(maxFeeMicro) + 3) + "' fill='#f59e0b' text-anchor='start'>" + escapeHtml(feeTopLabel) + "</text>" +
+        "<text class='chart-axis' x='" + (leftPad + plotWidth + 2) + "' y='" + (yForFee(maxFeeMicro / 2) + 3) + "' fill='#f59e0b' text-anchor='start'>" + escapeHtml(feeMidLabel) + "</text>" +
+        "<text class='chart-axis' x='" + (leftPad + plotWidth + 2) + "' y='" + (yForFee(0) + 3) + "' fill='#f59e0b' text-anchor='start'>0</text>";
+
+      svg.innerHTML = grid + bars + feeLine;
     }
 
     function linkifyAlertMessage(alert) {
@@ -864,6 +949,10 @@
       if (key.startsWith("burn-block-")) return "New burn block observed";
       if (key.startsWith("tenure-extend-")) return "Tenure extend observed";
       if (key.startsWith("burnchain-reorg-")) return "Burnchain reorg detected";
+      if (key.startsWith("sortition-winner-rejected-")) return "Sortition winner rejected";
+      if (key.startsWith("node-block-proposal-rejected-")) return "Node rejected block proposal";
+      if (key.startsWith("miner-signers-rejected-")) return "Miner proposal rejected by signers";
+      if (key.startsWith("signer-validation-slow-")) return "Slow signer validation";
       if (key.startsWith("large-signer-participation-")) return "Signer participation drop detected";
       if (key.startsWith("sortition-parent-burn-mismatch-")) return "Sortition parent-burn mismatch";
       if (key.startsWith("mempool-iteration-deadline")) return "Miner mempool iteration hit deadline";
@@ -1087,12 +1176,59 @@
           const count = Number(item && item.block_count);
           return sum + (Number.isFinite(count) ? count : 0);
         }, 0);
-        tenureBlocksMeta.textContent =
-          "last " +
+        const totalTxs = tenureCounts.reduce((sum, item) => {
+          const count = Number(item && item.tx_count_total);
+          return sum + (Number.isFinite(count) ? count : 0);
+        }, 0);
+        const totalFees = tenureCounts.reduce((sum, item) => {
+          const fee = Number(item && item.fee_microstx_total);
+          return sum + (Number.isFinite(fee) ? fee : 0);
+        }, 0);
+        const currentTenure =
+          data.current_tenure_metrics ||
+          tenureCounts[tenureCounts.length - 1] ||
+          null;
+        const windowTypeCountsFromSnapshot =
+          data.tenure_window_totals &&
+          data.tenure_window_totals.tx_type_counts &&
+          typeof data.tenure_window_totals.tx_type_counts === "object"
+            ? data.tenure_window_totals.tx_type_counts
+            : null;
+        const aggregatedTypeCounts = windowTypeCountsFromSnapshot || tenureCounts.reduce((acc, row) => {
+          const rowTypes = row && row.tx_type_counts && typeof row.tx_type_counts === "object"
+            ? row.tx_type_counts
+            : {};
+          const keys = ["transfer", "contract_call", "contract_deploy", "coinbase", "tenure_change", "other"];
+          for (const key of keys) {
+            acc[key] = (Number(acc[key]) || 0) + (Number(rowTypes[key]) || 0);
+          }
+          return acc;
+        }, {});
+        const currentBlocks = Number(currentTenure && currentTenure.block_count) || 0;
+        const currentTxs = Number(currentTenure && currentTenure.tx_count_total) || 0;
+        const currentFees = Number(currentTenure && currentTenure.fee_microstx_total) || 0;
+        tenureBlocksMeta.innerHTML =
+          "<span><strong>Current:</strong> " +
+          currentBlocks +
+          " blocks, " +
+          currentTxs.toLocaleString(undefined) +
+          " txs, " +
+          escapeHtml(formatStxFromMicro(currentFees)) +
+          " fees</span>" +
+          "<span><strong>Last " +
           tenureCounts.length +
-          " tenures | " +
-          totalBlocks +
-          " confirmed blocks | source node tips";
+          " tenures:</strong> " +
+          totalBlocks.toLocaleString(undefined) +
+          " blocks, " +
+          totalTxs.toLocaleString(undefined) +
+          " txs, " +
+          escapeHtml(formatStxFromMicro(totalFees)) +
+          " fees</span>" +
+          "<span><strong>Tx mix (last " +
+          tenureCounts.length +
+          "):</strong> " +
+          escapeHtml(formatTxMix(aggregatedTypeCounts)) +
+          "</span>";
       }
 
       const reports = data.recent_reports || [];

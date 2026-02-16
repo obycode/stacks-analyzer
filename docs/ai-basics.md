@@ -61,6 +61,12 @@ Chain and tenure:
 - `CONSENSUS(<burn>): <consensus_hash>` -> consensus hash and burn height.
 - `Tenure: Notify burn block!` -> burn height/consensus updates.
 - `payload: TenureChange(Extend...)` -> tenure extend metadata.
+- `Handled StacksHTTPRequest ... path: /v3/block_proposal` -> validation request
+  load signal for signer-submitted proposal checks.
+- `Rejected block proposal, reason: ...` -> node-side proposal validation reject
+  reason (useful for root cause).
+- `Error while gathering signatures: SignersRejected...` -> miner abandon/retry
+  signal with pause duration.
 
 ## Thresholds and Finalization Rules
 
@@ -76,6 +82,19 @@ Alert levels:
 - `info`: informational events (new burn block, tenure extend, signer reject).
 - `warning`: non-critical degradations (e.g., large signer participation drop).
 - `critical`: stalls or hard failures.
+
+Additional warning/info alerts:
+- sortition winner rejected (null-miner reason surfaced explicitly).
+- node-side block proposal rejected (includes reject reason and proposal id when present).
+- miner signers-rejected retry events (includes retry pause).
+- slow signer block validation (`validation_time_ms` > 2000ms).
+
+Tenure fee/tx accounting:
+- Confirmed-fee tracking uses `Participant: validated anchored block` fields,
+  especially `tx_fees_microstacks` and `tx_count`, but these are only applied
+  once the same `block_header_hash` is seen in `Advanced to new tip`.
+- This avoids counting mock-miner assembly output and keeps tenure totals tied
+  to confirmed chain progress.
 
 Telegram:
 - Only alerts with severity >= configured minimum are sent to Telegram.

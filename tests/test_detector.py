@@ -404,7 +404,7 @@ class TestDetector(unittest.TestCase):
             "signer-accept-then-reject-%s-%s" % (signature_hash, "pub1"[:10]),
             keys,
         )
-        self.assertEqual(detector.signer_weight_samples["pub1"][-1], 42)
+        self.assertEqual(detector.signer_weight_samples["pub1"][-1], 10)
 
         detector.process_event(
             ParsedEvent(
@@ -502,6 +502,105 @@ class TestDetector(unittest.TestCase):
         self.assertEqual(alerts[0].key, "burnchain-reorg-935496")
         self.assertEqual(alerts[0].severity, "warning")
         self.assertIn("highest common ancestor at height 935496", alerts[0].message)
+
+    def test_sortition_winner_rejected_emits_info_alert(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        alerts = detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_sortition_winner_rejected",
+                ts=100.0,
+                fields={
+                    "burn_height": 935500,
+                    "rejection_reason": "Miner did not mine often enough to win",
+                    "rejected_txid": "abc123",
+                },
+            )
+        )
+        keys = {alert.key for alert in alerts}
+        self.assertIn("sortition-winner-rejected-935500", keys)
+        message = next(
+            alert.message for alert in alerts if alert.key == "sortition-winner-rejected-935500"
+        )
+        self.assertIn("Miner did not mine often enough to win", message)
+
+    def test_node_block_proposal_rejected_emits_warning_alert(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        alerts = detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_block_proposal_rejected",
+                ts=100.0,
+                fields={
+                    "reason": "InvalidParentBlock",
+                    "signer_signature_hash": "f98fab91d65e",
+                    "block_height": 6365169,
+                    "burn_height": 935297,
+                },
+            )
+        )
+        self.assertEqual(len(alerts), 1)
+        self.assertTrue(alerts[0].key.startswith("node-block-proposal-rejected-"))
+        self.assertEqual(alerts[0].severity, "warning")
+        self.assertIn("InvalidParentBlock", alerts[0].message)
+
+    def test_node_signers_rejected_emits_warning_alert(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        alerts = detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_signers_rejected",
+                ts=100.0,
+                fields={
+                    "pause_ms": 500,
+                    "signer_signature_hash": "f98fab91d65e",
+                    "block_height": 6365169,
+                    "consensus_hash": "abcde",
+                },
+            )
+        )
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].key, "miner-signers-rejected-f98fab91d65e")
+        self.assertEqual(alerts[0].severity, "warning")
+        self.assertIn("retry_pause_ms=500", alerts[0].message)
+
+    def test_signer_validation_slow_emits_warning_alert(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        alerts = detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_block_validate_ok",
+                ts=100.0,
+                fields={
+                    "signer_signature_hash": "f98fab91d65e",
+                    "validation_time_ms": 2400,
+                },
+            )
+        )
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].key, "signer-validation-slow-f98fab91d65e")
+        self.assertEqual(alerts[0].severity, "warning")
+        self.assertIn("2400ms", alerts[0].message)
 
     def test_new_block_event_closes_proposal_and_updates_heights(self) -> None:
         detector = Detector(
@@ -748,6 +847,91 @@ class TestDetector(unittest.TestCase):
         self.assertEqual(counts[0]["block_count"], 2)
         self.assertEqual(counts[1]["consensus_hash"], "bb22")
         self.assertEqual(counts[1]["block_count"], 1)
+
+    def test_tenure_block_counts_accumulate_confirmed_txs_fees_and_types(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        block_header_hash = "aa" * 32
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_block_proposal",
+                ts=100.0,
+                fields={
+                    "is_validation_request": True,
+                    "block_header_hash": block_header_hash,
+                    "tx_count": 2,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_include_tx",
+                ts=100.1,
+                fields={
+                    "txid": "tx1",
+                    "payload": "TokenTransfer",
+                    "from_block_proposal_thread": True,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_include_tx",
+                ts=100.2,
+                fields={
+                    "txid": "tx2",
+                    "payload": "ContractCall",
+                    "from_block_proposal_thread": True,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_block_proposal",
+                ts=100.3,
+                fields={
+                    "is_validated": True,
+                    "block_header_hash": block_header_hash,
+                    "tx_count": 2,
+                    "tx_fees_microstacks": 6580,
+                    "runtime": 100,
+                    "write_len": 100,
+                    "write_cnt": 1,
+                    "read_len": 100,
+                    "read_cnt": 1,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tip_advanced",
+                ts=101.0,
+                fields={
+                    "consensus_hash": "cc11",
+                    "block_header_hash": block_header_hash,
+                },
+            )
+        )
+
+        snapshot = detector.snapshot(now=102.0)
+        counts = snapshot["recent_tenure_block_counts"]
+        self.assertEqual(len(counts), 1)
+        self.assertEqual(counts[0]["block_count"], 1)
+        self.assertEqual(counts[0]["tx_count_total"], 2)
+        self.assertEqual(counts[0]["fee_microstx_total"], 6580)
+        type_counts = counts[0]["tx_type_counts"]
+        self.assertEqual(type_counts["transfer"], 1)
+        self.assertEqual(type_counts["contract_call"], 1)
+        self.assertEqual(type_counts["contract_deploy"], 0)
 
     def test_tenure_block_counts_keeps_last_eight(self) -> None:
         detector = Detector(
@@ -1269,12 +1453,12 @@ class TestDetector(unittest.TestCase):
         )
         alerts2 = detector.process_event(
             ParsedEvent(
-                source="signer",
-                kind="signer_state_machine_update",
+                source="node",
+                kind="node_consensus",
                 ts=105.0,
                 fields={
                     "burn_height": 101,
-                    "burn_block": "bb",
+                    "consensus_hash": "bb",
                 },
             )
         )
@@ -1321,6 +1505,19 @@ class TestDetector(unittest.TestCase):
                 },
             )
         )
+        burn_alerts.extend(
+            detector.process_event(
+                ParsedEvent(
+                    source="node",
+                    kind="node_consensus",
+                    ts=100.1,
+                    fields={
+                        "burn_height": 934988,
+                        "consensus_hash": "aa" * 20,
+                    },
+                )
+            )
+        )
         burn_keys = {alert.key for alert in burn_alerts}
         self.assertIn("burn-block-934988", burn_keys)
         self.assertTrue(all(alert.severity == "info" for alert in burn_alerts))
@@ -1354,7 +1551,7 @@ class TestDetector(unittest.TestCase):
             )
         )
         detector.current_bitcoin_block_height = 934987
-        alerts = detector.process_event(
+        detector.process_event(
             ParsedEvent(
                 source="node",
                 kind="node_sortition_winner_selected",
@@ -1363,6 +1560,17 @@ class TestDetector(unittest.TestCase):
                     "burn_height": 934988,
                     "winner_txid": "aa11bb22cc33dd44",
                     "winning_stacks_block_hash": "bb" * 32,
+                },
+            )
+        )
+        alerts = detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_consensus",
+                ts=100.1,
+                fields={
+                    "burn_height": 934988,
+                    "consensus_hash": "cc" * 20,
                 },
             )
         )

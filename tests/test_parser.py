@@ -140,6 +140,71 @@ class TestLogParser(unittest.TestCase):
         self.assertEqual(event.fields["total_weight"], 3912)
         self.assertAlmostEqual(event.fields["percent_rejected"], 32.5)
 
+    def test_parse_signer_block_validate_ok(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 06 04:37:44 host stacks-signer[1]: INFO [1770370664.324761] "
+            "Cycle #125 Signer #13: Received a block validate response: Ok(BlockValidateOk { "
+            "signer_signature_hash: f98fab91d65e7a39878d01c5716003e712f2ed3b741eb7d32a0deb2d72ca0700, "
+            "cost: ExecutionCost { write_length: 9450, write_count: 160, read_length: 1932425, "
+            "read_count: 486, runtime: 10847374 }, size: 180, validation_time_ms: 62 })"
+        )
+
+        events = parser.parse_line("signer", line)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.kind, "signer_block_validate_ok")
+        self.assertEqual(
+            event.fields["signer_signature_hash"],
+            "f98fab91d65e7a39878d01c5716003e712f2ed3b741eb7d32a0deb2d72ca0700",
+        )
+        self.assertEqual(event.fields["validation_time_ms"], 62)
+        self.assertEqual(event.fields["size"], 180)
+
+    def test_parse_node_block_proposal_rejected(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 06 04:37:44 host stacks-node[1]: INFO [1770370664.324761] "
+            "Rejected block proposal, reason: InvalidParentBlock, "
+            "signer_signature_hash: f98fab91d65e7a39878d01c5716003e712f2ed3b741eb7d32a0deb2d72ca0700, "
+            "height: 6365169, burn_block_height: 935297"
+        )
+
+        events = parser.parse_line("node", line)
+        rejection_events = [
+            event for event in events if event.kind == "node_block_proposal_rejected"
+        ]
+        self.assertEqual(len(rejection_events), 1)
+        event = rejection_events[0]
+        self.assertEqual(event.fields["reason"], "InvalidParentBlock")
+        self.assertEqual(event.fields["block_height"], 6365169)
+        self.assertEqual(event.fields["burn_height"], 935297)
+        self.assertEqual(
+            event.fields["signer_signature_hash"],
+            "f98fab91d65e7a39878d01c5716003e712f2ed3b741eb7d32a0deb2d72ca0700",
+        )
+
+    def test_parse_node_signers_rejected(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 06 04:37:44 host stacks-node[1]: ERROR [1770370664.324761] "
+            "Error while gathering signatures: SignersRejected. Will try mining again in 500."
+            " signer_signature_hash: f98fab91d65e7a39878d01c5716003e712f2ed3b741eb7d32a0deb2d72ca0700, "
+            "block_height: 6365169, consensus_hash: da98"
+        )
+
+        events = parser.parse_line("node", line)
+        rejected_events = [event for event in events if event.kind == "node_signers_rejected"]
+        self.assertEqual(len(rejected_events), 1)
+        event = rejected_events[0]
+        self.assertEqual(event.fields["pause_ms"], 500)
+        self.assertEqual(event.fields["block_height"], 6365169)
+        self.assertEqual(event.fields["consensus_hash"], "da98")
+        self.assertEqual(
+            event.fields["signer_signature_hash"],
+            "f98fab91d65e7a39878d01c5716003e712f2ed3b741eb7d32a0deb2d72ca0700",
+        )
+
     def test_parse_node_winning_commit_and_tenure_events(self) -> None:
         parser = LogParser()
         winning_line = (
@@ -192,26 +257,39 @@ class TestLogParser(unittest.TestCase):
         self.assertEqual(tenure_notify_events[0].fields["burn_height"], 934988)
 
         tenure_change_events = parser.parse_line("node", tenure_change_line)
-        self.assertEqual(len(tenure_change_events), 1)
-        self.assertEqual(tenure_change_events[0].kind, "node_tenure_change")
+        self.assertGreaterEqual(len(tenure_change_events), 1)
+        tenure_change_event = next(
+            event
+            for event in tenure_change_events
+            if event.kind == "node_tenure_change"
+        )
+        include_tx_event = next(
+            event for event in tenure_change_events if event.kind == "node_include_tx"
+        )
+        self.assertEqual(include_tx_event.fields["payload"], "TenureChange(ExtendAll)")
+        self.assertTrue(include_tx_event.fields["from_block_proposal_thread"])
         self.assertEqual(
-            tenure_change_events[0].fields["tenure_change_kind"], "ExtendAll"
+            tenure_change_event.fields["tenure_change_kind"], "ExtendAll"
         )
         self.assertEqual(
-            tenure_change_events[0].fields["txid"],
+            tenure_change_event.fields["txid"],
             "de87361bbfb8358f2401f96f6c52da86748854334c708e2c8696a19a1d2df269",
         )
-        self.assertIsNone(tenure_change_events[0].fields["block_height"])
+        self.assertIsNone(tenure_change_event.fields["block_height"])
 
         tenure_change_with_height_events = parser.parse_line(
             "node", tenure_change_with_height_line
         )
-        self.assertEqual(len(tenure_change_with_height_events), 1)
-        self.assertEqual(
-            tenure_change_with_height_events[0].fields["block_height"], 6319949
+        tenure_change_with_height_event = next(
+            event
+            for event in tenure_change_with_height_events
+            if event.kind == "node_tenure_change"
         )
         self.assertEqual(
-            tenure_change_with_height_events[0].fields["burn_height"], 934990
+            tenure_change_with_height_event.fields["block_height"], 6319949
+        )
+        self.assertEqual(
+            tenure_change_with_height_event.fields["burn_height"], 934990
         )
 
         consensus_events = parser.parse_line("node", consensus_line)
@@ -353,11 +431,29 @@ class TestLogParser(unittest.TestCase):
         )
         self.assertEqual(event.fields["block_height"], 6319924)
         self.assertEqual(event.fields["tx_count"], 1)
+        self.assertEqual(event.fields["tx_fees_microstacks"], 180)
+        self.assertTrue(event.fields["is_validated"])
+        self.assertFalse(event.fields["is_validation_request"])
         self.assertEqual(event.fields["runtime"], 65074508)
         self.assertEqual(event.fields["write_len"], 6003)
         self.assertEqual(event.fields["write_cnt"], 102)
         self.assertEqual(event.fields["read_len"], 620032)
         self.assertEqual(event.fields["read_cnt"], 45)
+
+    def test_parse_node_block_proposal_request(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 04 08:00:03 host stacks-node[1]: INFO [1770210003.802752] "
+            "[stackslib/src/net/api/postblock_proposal.rs:1032] [p2p:(1,2)] "
+            "Received block proposal request, signer_signature_hash: c6c4f00a06d58c8049e0f14e5e75c9b6eed0c4c93d7f07151e607d7d4e62ab59, "
+            "block_header_hash: c6c4f00a06d58c8049e0f14e5e75c9b6eed0c4c93d7f07151e607d7d4e62ab59, "
+            "height: 6319924, tx_count: 1, parent_stacks_block_id: 2e3ba4092ea2ddf11328ac37873bd0187a256b9f40c2ce12ea5db12f5f56ba8f"
+        )
+        events = parser.parse_line("node", line)
+        event = next(evt for evt in events if evt.kind == "node_block_proposal")
+        self.assertTrue(event.fields["is_validation_request"])
+        self.assertFalse(event.fields["is_validated"])
+        self.assertEqual(event.fields["tx_count"], 1)
 
 
 if __name__ == "__main__":

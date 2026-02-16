@@ -47,6 +47,13 @@ MEMPOOL_ITERATION_RE = re.compile(
 )
 EXECUTION_CONSUMED_RE = re.compile(r'execution_consumed:\s*(\{[^}]+\})')
 EXECUTION_COST_RE = re.compile(r'execution_cost:\s*(\{[^}]+\})')
+INCLUDE_TX_PAYLOAD_RE = re.compile(r"payload:\s*(?P<payload>[^,]+)")
+NODE_REJECTED_BLOCK_PROPOSAL_RE = re.compile(
+    r"Rejected block proposal.*?reason:\s*(?P<reason>[^,]+)"
+)
+SIGNERS_REJECTED_RE = re.compile(
+    r"Error while gathering signatures:\s*SignersRejected\.\s*Will try mining again in\s+(?P<pause_ms>\d+)"
+)
 
 
 def extract_timestamp(line: str) -> float:
@@ -208,12 +215,15 @@ class LogParser:
                 )
 
             if "Received block proposal request" in line or "validated anchored block" in line:
+                is_validation_request = "Received block proposal request" in line
+                is_validated = "validated anchored block" in line
                 block_header_hash = extract_field(line, "block_header_hash")
                 block_height = extract_field(line, "height")
                 burn_height = extract_field(line, "burn_block_height") or extract_field(
                     line, "burn_height"
                 )
                 tx_count = extract_field(line, "tx_count")
+                tx_fees_microstacks = extract_field(line, "tx_fees_microstacks")
                 execution_cost = None
                 execution_cost_match = EXECUTION_COST_RE.search(line)
                 if execution_cost_match:
@@ -239,6 +249,16 @@ class LogParser:
                                 int(tx_count)
                                 if tx_count is not None
                                 else None
+                            ),
+                            "tx_fees_microstacks": (
+                                int(tx_fees_microstacks)
+                                if tx_fees_microstacks is not None
+                                else None
+                            ),
+                            "is_validation_request": is_validation_request,
+                            "is_validated": is_validated,
+                            "signer_signature_hash": extract_field(
+                                line, "signer_signature_hash"
                             ),
                             "runtime": (
                                 int(execution_cost.get("runtime"))
@@ -270,6 +290,103 @@ class LogParser:
                                 and execution_cost.get("read_cnt") is not None
                                 else None
                             ),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "Include tx" in line and "payload:" in line:
+                payload_match = INCLUDE_TX_PAYLOAD_RE.search(line)
+                payload_text = payload_match.group("payload").strip() if payload_match else None
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_include_tx",
+                        ts=ts,
+                        fields={
+                            "txid": extract_field(line, "tx") or extract_field(line, "tx_id"),
+                            "payload": payload_text,
+                            "origin": extract_field(line, "origin"),
+                            "from_block_proposal_thread": "[block-proposal]" in line,
+                        },
+                        line=line,
+                    )
+                )
+
+            if "Handled StacksHTTPRequest" in line and "/v3/block_proposal" in line:
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_block_proposal_validation_request",
+                        ts=ts,
+                        fields={
+                            "path": extract_field(line, "path"),
+                            "status": extract_field(line, "status"),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "Rejected block proposal" in line:
+                rejected_match = NODE_REJECTED_BLOCK_PROPOSAL_RE.search(line)
+                block_height_match = re.search(r"(?:^|,\s)height:\s*(\d+)", line)
+                burn_height_match = re.search(
+                    r"(?:^|,\s)burn_block_height:\s*(\d+)", line
+                )
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_block_proposal_rejected",
+                        ts=ts,
+                        fields={
+                            "reason": (
+                                rejected_match.group("reason").strip()
+                                if rejected_match
+                                else None
+                            ),
+                            "signer_signature_hash": extract_field(
+                                line, "signer_signature_hash"
+                            ),
+                            "block_height": (
+                                int(block_height_match.group(1))
+                                if block_height_match
+                                else None
+                            ),
+                            "burn_height": (
+                                int(burn_height_match.group(1))
+                                if burn_height_match
+                                else None
+                            ),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "Error while gathering signatures: SignersRejected" in line:
+                rejected_match = SIGNERS_REJECTED_RE.search(line)
+                block_height_match = re.search(
+                    r"(?:^|,\s)block_height:\s*(\d+)", line
+                )
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="node_signers_rejected",
+                        ts=ts,
+                        fields={
+                            "pause_ms": (
+                                int(rejected_match.group("pause_ms"))
+                                if rejected_match
+                                else None
+                            ),
+                            "signer_signature_hash": extract_field(
+                                line, "signer_signature_hash"
+                            ),
+                            "block_height": (
+                                int(block_height_match.group(1))
+                                if block_height_match
+                                else None
+                            ),
+                            "consensus_hash": extract_field(line, "consensus_hash"),
                         },
                         line=line,
                     )
@@ -554,6 +671,28 @@ class LogParser:
                             "burn_height": int(burn_height) if burn_height else None,
                             "block_id": extract_field(line, "block_id"),
                             "consensus_hash": extract_field(line, "consensus_hash"),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "Received a block validate response: Ok(BlockValidateOk" in line:
+                signature_hash = extract_field(line, "signer_signature_hash")
+                validation_time_ms = extract_field(line, "validation_time_ms")
+                block_size = extract_field(line, "size")
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_block_validate_ok",
+                        ts=ts,
+                        fields={
+                            "signer_signature_hash": signature_hash,
+                            "validation_time_ms": (
+                                int(validation_time_ms)
+                                if validation_time_ms
+                                else None
+                            ),
+                            "size": int(block_size) if block_size else None,
                         },
                         line=line,
                     )

@@ -646,8 +646,53 @@ class MonitoringService:
         elif kind == "node_sortition_winner_rejected":
             burn = data.get("burn_height")
             message = "Sortition selected null miner"
+            parts = []
             if burn is not None:
-                message = "%s | burn=%s" % (message, burn)
+                parts.append("burn=%s" % burn)
+            reason = data.get("rejection_reason")
+            if isinstance(reason, str) and reason:
+                parts.append("reason=%s" % reason)
+            if parts:
+                message = "%s | %s" % (message, " ".join(parts))
+        elif kind == "node_block_proposal_rejected":
+            message = "Node rejected block proposal"
+            parts = []
+            reason = data.get("reason")
+            if isinstance(reason, str) and reason:
+                parts.append("reason=%s" % reason)
+            block_height = data.get("block_height")
+            if block_height is not None:
+                parts.append("height=%s" % block_height)
+            signature_hash = data.get("signer_signature_hash")
+            if isinstance(signature_hash, str) and signature_hash:
+                parts.append(self._short_id(signature_hash, 12))
+            if parts:
+                message = "%s | %s" % (message, " ".join(parts))
+        elif kind == "node_signers_rejected":
+            message = "Miner proposal rejected by signers"
+            parts = []
+            pause_ms = data.get("pause_ms")
+            if pause_ms is not None:
+                parts.append("retry_pause_ms=%s" % pause_ms)
+            block_height = data.get("block_height")
+            if block_height is not None:
+                parts.append("height=%s" % block_height)
+            signature_hash = data.get("signer_signature_hash")
+            if isinstance(signature_hash, str) and signature_hash:
+                parts.append(self._short_id(signature_hash, 12))
+            if parts:
+                message = "%s | %s" % (message, " ".join(parts))
+        elif kind == "signer_block_validate_ok":
+            message = "Signer block validation ok"
+            parts = []
+            validation_time_ms = data.get("validation_time_ms")
+            if validation_time_ms is not None:
+                parts.append("validation_time_ms=%s" % validation_time_ms)
+            signature_hash = data.get("signer_signature_hash")
+            if isinstance(signature_hash, str) and signature_hash:
+                parts.append(self._short_id(signature_hash, 12))
+            if parts:
+                message = "%s | %s" % (message, " ".join(parts))
         elif kind == "node_tenure_change":
             change_kind = data.get("tenure_change_kind")
             block_height = data.get("block_height")
@@ -1409,6 +1454,27 @@ class MonitoringService:
             title = "Burnchain reorg detected"
             description = (
                 "The burnchain reorganized to a different branch. Validate post-reorg miner and proposal behavior."
+            )
+        elif key_text.startswith("sortition-winner-rejected-"):
+            title = "Sortition winner rejected"
+            description = (
+                "The selected sortition winner was rejected, resulting in a null-miner outcome for that burn block."
+            )
+        elif key_text.startswith("node-block-proposal-rejected-"):
+            title = "Node rejected block proposal"
+            description = (
+                "The local stacks node rejected a block proposal during validation. "
+                "Review the rejection reason and surrounding signer activity."
+            )
+        elif key_text.startswith("miner-signers-rejected-"):
+            title = "Miner proposal rejected by signers"
+            description = (
+                "The miner gathered enough signer rejections to abandon a proposal and retry."
+            )
+        elif key_text.startswith("signer-validation-slow-"):
+            title = "Slow signer validation"
+            description = (
+                "Signer-side proposal validation took longer than expected, which can delay block finalization."
             )
         elif key_text.startswith("large-signer-participation-"):
             title = "Signer participation drop detected"

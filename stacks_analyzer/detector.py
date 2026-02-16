@@ -20,6 +20,15 @@ EXECUTION_COST_LIMITS = {
     "read_cnt": 15_000,
 }
 MEMPOOL_EMPTY_ALERT_SECONDS = 90
+SLOW_SIGNER_VALIDATION_MS = 2_000
+TX_TYPE_KEYS = (
+    "transfer",
+    "contract_call",
+    "contract_deploy",
+    "coinbase",
+    "tenure_change",
+    "other",
+)
 
 
 @dataclass
@@ -109,6 +118,8 @@ class Detector:
         self.block_interval_total_seconds: float = 0.0
         self.block_interval_samples: int = 0
         self.last_signer_proposal_ts: Optional[float] = None
+        self.last_signer_validation_ts: Optional[float] = None
+        self.last_signer_validation_ms: Optional[int] = None
         self.last_report_ts: float = 0.0
         self.last_mempool_ready_txs: Optional[int] = None
         self.last_mempool_ready_ts: Optional[float] = None
@@ -116,6 +127,7 @@ class Detector:
         self.last_mempool_elapsed_ms: Optional[int] = None
         self.last_mempool_ts: Optional[float] = None
         self.mempool_iteration_history: Deque[Dict[str, object]] = deque(maxlen=720)
+        self.block_proposal_validation_requests: Deque[float] = deque(maxlen=4096)
         self.last_execution_costs: Optional[Dict[str, int]] = None
         self.last_execution_costs_percent: Optional[Dict[str, float]] = None
         self.last_execution_cost_ts: Optional[float] = None
@@ -156,6 +168,7 @@ class Detector:
         self.execution_cost_history: Deque[Dict[str, object]] = deque(maxlen=720)
         self.pending_execution_cost_by_block_hash: Dict[str, Dict[str, object]] = {}
         self.pending_execution_cost_order: Deque[str] = deque()
+        self.pending_validation_contexts: Deque[Dict[str, object]] = deque(maxlen=128)
         self.signer_names: Dict[str, str] = signer_names or {}
 
         self.processed_lines: Dict[str, int] = defaultdict(int)
@@ -206,6 +219,15 @@ class Detector:
         self._index_hash_height_from_event(event)
 
         if event.kind == "node_tip_advanced":
+            block_metrics = self._apply_confirmed_execution_cost(
+                ts=event.ts,
+                block_header_hash=event.fields.get("block_header_hash")
+                if isinstance(event.fields.get("block_header_hash"), str)
+                else None,
+                consensus_hash=event.fields.get("consensus_hash")
+                if isinstance(event.fields.get("consensus_hash"), str)
+                else None,
+            )
             if self.last_node_tip_ts is not None:
                 interval_seconds = event.ts - self.last_node_tip_ts
                 if interval_seconds > 0:
@@ -218,6 +240,24 @@ class Detector:
                 if isinstance(event.fields.get("consensus_hash"), str)
                 else None,
                 ts=event.ts,
+                tx_count=(
+                    block_metrics.get("tx_count")
+                    if isinstance(block_metrics, dict)
+                    and isinstance(block_metrics.get("tx_count"), int)
+                    else None
+                ),
+                tx_fees_microstacks=(
+                    block_metrics.get("tx_fees_microstacks")
+                    if isinstance(block_metrics, dict)
+                    and isinstance(block_metrics.get("tx_fees_microstacks"), int)
+                    else None
+                ),
+                tx_type_counts=(
+                    block_metrics.get("tx_type_counts")
+                    if isinstance(block_metrics, dict)
+                    and isinstance(block_metrics.get("tx_type_counts"), dict)
+                    else None
+                ),
             )
             self._record_confirmed_block_event(
                 ts=event.ts,
@@ -234,15 +274,6 @@ class Detector:
                 if isinstance(event.fields.get("block_header_hash"), str)
                 else None,
                 event_line=event.line,
-            )
-            self._apply_confirmed_execution_cost(
-                ts=event.ts,
-                block_header_hash=event.fields.get("block_header_hash")
-                if isinstance(event.fields.get("block_header_hash"), str)
-                else None,
-                consensus_hash=event.fields.get("consensus_hash")
-                if isinstance(event.fields.get("consensus_hash"), str)
-                else None,
             )
             self._clear_stall("node-stall", event.ts, alerts)
 
@@ -270,8 +301,11 @@ class Detector:
         elif event.kind == "node_block_proposal":
             block_header_hash = event.fields.get("block_header_hash")
             if isinstance(block_header_hash, str) and block_header_hash:
+                if event.fields.get("is_validation_request") is True:
+                    self._track_validation_request(block_header_hash, event)
                 costs, cost_percents = self._extract_costs_from_fields(event.fields)
-                if costs:
+                is_validated = event.fields.get("is_validated")
+                if costs and (is_validated is True or is_validated is None):
                     self._remember_pending_execution_cost(
                         block_header_hash=block_header_hash,
                         ts=event.ts,
@@ -284,12 +318,21 @@ class Detector:
                         percent_full=event.fields.get("percent_full")
                         if isinstance(event.fields.get("percent_full"), int)
                         else None,
+                        tx_fees_microstacks=event.fields.get("tx_fees_microstacks")
+                        if isinstance(event.fields.get("tx_fees_microstacks"), int)
+                        else None,
                         consensus_hash=event.fields.get("consensus_hash")
                         if isinstance(event.fields.get("consensus_hash"), str)
                         else None,
+                        tx_type_counts=self._pop_validation_payload_counts(
+                            block_header_hash
+                        ),
                         costs=costs,
                         cost_percents=cost_percents,
                     )
+
+        elif event.kind == "node_include_tx":
+            self._track_validation_payload(event)
 
         elif event.kind == "node_mempool_iteration":
             considered_txs = event.fields.get("considered_txs")
@@ -394,6 +437,22 @@ class Detector:
                 round_state.winner_stacks_block_hash = None
                 round_state.winner_ts = event.ts
                 self._refresh_current_miner_from_latest_round(event.ts)
+                rejection_reason = event.fields.get("rejection_reason")
+                reason_text = (
+                    str(rejection_reason)
+                    if isinstance(rejection_reason, str) and rejection_reason
+                    else "unknown"
+                )
+                self._emit_alert(
+                    alerts=alerts,
+                    key="sortition-winner-rejected-%d" % burn_height,
+                    severity="info",
+                    message=(
+                        "Sortition winner rejected at burn height %d: %s"
+                        % (burn_height, reason_text)
+                    ),
+                    ts=event.ts,
+                )
 
         elif event.kind == "node_leader_block_commit":
             burn_height = event.fields.get("burn_height")
@@ -573,6 +632,69 @@ class Detector:
                     ts=event.ts,
                 )
 
+        elif event.kind == "node_block_proposal_validation_request":
+            self.block_proposal_validation_requests.append(event.ts)
+
+        elif event.kind == "node_block_proposal_rejected":
+            reason = event.fields.get("reason")
+            signer_signature_hash = event.fields.get("signer_signature_hash")
+            block_height = event.fields.get("block_height")
+            burn_height = event.fields.get("burn_height")
+            reason_text = (
+                str(reason).strip()
+                if isinstance(reason, str) and str(reason).strip()
+                else "unknown"
+            )
+            key_suffix = hashlib.sha1(reason_text.encode("utf-8")).hexdigest()[:12]
+            if isinstance(signer_signature_hash, str) and signer_signature_hash:
+                key = "node-block-proposal-rejected-%s" % signer_signature_hash
+            elif isinstance(block_height, int):
+                key = "node-block-proposal-rejected-%d-%s" % (block_height, key_suffix)
+            else:
+                key = "node-block-proposal-rejected-%s" % key_suffix
+            detail_parts = ["reason=%s" % reason_text]
+            if isinstance(block_height, int):
+                detail_parts.append("block_height=%d" % block_height)
+            if isinstance(burn_height, int):
+                detail_parts.append("burn_height=%d" % burn_height)
+            if isinstance(signer_signature_hash, str) and signer_signature_hash:
+                detail_parts.append("proposal=%s" % signer_signature_hash[:12])
+            self._emit_alert(
+                alerts=alerts,
+                key=key,
+                severity="warning",
+                message="Node rejected block proposal: %s" % " | ".join(detail_parts),
+                ts=event.ts,
+            )
+
+        elif event.kind == "node_signers_rejected":
+            pause_ms = event.fields.get("pause_ms")
+            signer_signature_hash = event.fields.get("signer_signature_hash")
+            block_height = event.fields.get("block_height")
+            consensus_hash = event.fields.get("consensus_hash")
+            if isinstance(signer_signature_hash, str) and signer_signature_hash:
+                key = "miner-signers-rejected-%s" % signer_signature_hash
+            elif isinstance(block_height, int):
+                key = "miner-signers-rejected-height-%d" % block_height
+            else:
+                key = "miner-signers-rejected"
+            parts = ["Miner proposal rejected by signers"]
+            if isinstance(pause_ms, int):
+                parts.append("retry_pause_ms=%d" % pause_ms)
+            if isinstance(block_height, int):
+                parts.append("block_height=%d" % block_height)
+            if isinstance(signer_signature_hash, str) and signer_signature_hash:
+                parts.append("proposal=%s" % signer_signature_hash[:12])
+            if isinstance(consensus_hash, str) and consensus_hash:
+                parts.append("consensus=%s" % consensus_hash[:12])
+            self._emit_alert(
+                alerts=alerts,
+                key=key,
+                severity="warning",
+                message=" | ".join(parts),
+                ts=event.ts,
+            )
+
         elif event.kind == "signer_state_machine_update":
             current_miner_pkh = event.fields.get("current_miner_pkh")
             if isinstance(current_miner_pkh, str) and current_miner_pkh:
@@ -622,6 +744,28 @@ class Detector:
                     ts=event.ts,
                     is_open=True,
                 )
+
+        elif event.kind == "signer_block_validate_ok":
+            self.last_signer_validation_ts = event.ts
+            validation_time_ms = event.fields.get("validation_time_ms")
+            if isinstance(validation_time_ms, int):
+                self.last_signer_validation_ms = validation_time_ms
+                if validation_time_ms > SLOW_SIGNER_VALIDATION_MS:
+                    signature_hash = event.fields.get("signer_signature_hash")
+                    if isinstance(signature_hash, str) and signature_hash:
+                        key = "signer-validation-slow-%s" % signature_hash
+                    else:
+                        key = "signer-validation-slow"
+                    self._emit_alert(
+                        alerts=alerts,
+                        key=key,
+                        severity="warning",
+                        message=(
+                            "Signer validation was slow: %dms (threshold=%dms)"
+                            % (validation_time_ms, SLOW_SIGNER_VALIDATION_MS)
+                        ),
+                        ts=event.ts,
+                    )
 
         elif event.kind == "signer_block_acceptance":
             signature_hash = event.fields.get("signer_signature_hash")
@@ -1590,10 +1734,20 @@ class Detector:
                 else:
                     sortition_state = "pending"
 
-        return (
+        null_reason: Optional[str] = None
+        if sortition_state == "null_miner":
+            round_state = self.sortition_rounds.get(burn_height)
+            if round_state is not None and isinstance(round_state.null_miner_reason, str):
+                if round_state.null_miner_reason:
+                    null_reason = round_state.null_miner_reason
+
+        message = (
             "New burn block observed at height %d | sortition=%s | new_miner=%s"
             % (burn_height, sortition_state, new_miner)
         )
+        if null_reason:
+            message += " | reason=%s" % null_reason
+        return message
 
     def _sortition_commit_to_row(
         self,
@@ -1782,7 +1936,12 @@ class Detector:
         )
 
     def _record_tenure_block_count(
-        self, consensus_hash: Optional[str], ts: float
+        self,
+        consensus_hash: Optional[str],
+        ts: float,
+        tx_count: Optional[int] = None,
+        tx_fees_microstacks: Optional[int] = None,
+        tx_type_counts: Optional[Dict[str, int]] = None,
     ) -> None:
         normalized_hash = (
             consensus_hash if isinstance(consensus_hash, str) and consensus_hash else None
@@ -1802,13 +1961,41 @@ class Detector:
                 current["block_count"] = current_count + 1
             else:
                 current["block_count"] = 1
+            current["tx_count_total"] = int(current.get("tx_count_total") or 0) + (
+                tx_count if isinstance(tx_count, int) else 0
+            )
+            current["fee_microstx_total"] = int(
+                current.get("fee_microstx_total") or 0
+            ) + (
+                tx_fees_microstacks if isinstance(tx_fees_microstacks, int) else 0
+            )
+            if isinstance(tx_type_counts, dict):
+                current_type_counts = current.get("tx_type_counts")
+                if not isinstance(current_type_counts, dict):
+                    current_type_counts = {key: 0 for key in TX_TYPE_KEYS}
+                for key in TX_TYPE_KEYS:
+                    increment = tx_type_counts.get(key)
+                    if isinstance(increment, int) and increment > 0:
+                        current_type_counts[key] = int(current_type_counts.get(key) or 0) + increment
+                current["tx_type_counts"] = current_type_counts
             current["end_ts"] = ts
             return
 
+        initial_type_counts = {key: 0 for key in TX_TYPE_KEYS}
+        if isinstance(tx_type_counts, dict):
+            for key in TX_TYPE_KEYS:
+                increment = tx_type_counts.get(key)
+                if isinstance(increment, int) and increment > 0:
+                    initial_type_counts[key] = increment
         self.tenure_block_counts.append(
             {
                 "consensus_hash": normalized_hash,
                 "block_count": 1,
+                "tx_count_total": tx_count if isinstance(tx_count, int) else 0,
+                "fee_microstx_total": (
+                    tx_fees_microstacks if isinstance(tx_fees_microstacks, int) else 0
+                ),
+                "tx_type_counts": initial_type_counts,
                 "start_ts": ts,
                 "end_ts": ts,
             }
@@ -1829,6 +2016,92 @@ class Detector:
             )
         return costs, cost_percents
 
+    def _track_validation_request(
+        self, block_header_hash: str, event: ParsedEvent
+    ) -> None:
+        if not isinstance(block_header_hash, str) or not block_header_hash:
+            return
+        for idx in range(len(self.pending_validation_contexts) - 1, -1, -1):
+            context = self.pending_validation_contexts[idx]
+            if context.get("block_header_hash") == block_header_hash:
+                del self.pending_validation_contexts[idx]
+                break
+        context = {
+            "block_header_hash": block_header_hash,
+            "ts": event.ts,
+            "tx_count": event.fields.get("tx_count")
+            if isinstance(event.fields.get("tx_count"), int)
+            else None,
+            "payload_counts": {key: 0 for key in TX_TYPE_KEYS},
+            "seen_txids": set(),
+        }
+        self.pending_validation_contexts.append(context)
+
+    def _track_validation_payload(self, event: ParsedEvent) -> None:
+        if not self.pending_validation_contexts:
+            return
+        if event.fields.get("from_block_proposal_thread") is not True:
+            return
+        payload = event.fields.get("payload")
+        payload_type = self._classify_payload(payload)
+        txid = event.fields.get("txid")
+        for context in reversed(self.pending_validation_contexts):
+            payload_counts = context.get("payload_counts")
+            seen_txids = context.get("seen_txids")
+            if not isinstance(payload_counts, dict) or not isinstance(seen_txids, set):
+                continue
+            if isinstance(txid, str) and txid:
+                if txid in seen_txids:
+                    return
+                seen_txids.add(txid)
+            payload_counts[payload_type] = int(payload_counts.get(payload_type) or 0) + 1
+            return
+
+    def _pop_validation_payload_counts(
+        self, block_header_hash: str
+    ) -> Optional[Dict[str, int]]:
+        if not self.pending_validation_contexts:
+            return None
+        matched_index = None
+        for idx in range(len(self.pending_validation_contexts) - 1, -1, -1):
+            context = self.pending_validation_contexts[idx]
+            if context.get("block_header_hash") == block_header_hash:
+                matched_index = idx
+                break
+        if matched_index is None:
+            return None
+        context = self.pending_validation_contexts[matched_index]
+        del self.pending_validation_contexts[matched_index]
+        payload_counts = context.get("payload_counts")
+        if not isinstance(payload_counts, dict):
+            return None
+        normalized = {key: 0 for key in TX_TYPE_KEYS}
+        for key in TX_TYPE_KEYS:
+            value = payload_counts.get(key)
+            if isinstance(value, int) and value > 0:
+                normalized[key] = value
+        return normalized
+
+    def _classify_payload(self, payload: object) -> str:
+        if not isinstance(payload, str) or not payload:
+            return "other"
+        text = payload.strip().lower()
+        if text.startswith("tokentransfer") or text.startswith("transfer"):
+            return "transfer"
+        if text.startswith("contractcall") or text.startswith("call"):
+            return "contract_call"
+        if (
+            text.startswith("smartcontract")
+            or text.startswith("contractdeploy")
+            or text.startswith("publishcontract")
+        ):
+            return "contract_deploy"
+        if text.startswith("coinbase"):
+            return "coinbase"
+        if text.startswith("tenurechange"):
+            return "tenure_change"
+        return "other"
+
     def _remember_pending_execution_cost(
         self,
         block_header_hash: str,
@@ -1836,7 +2109,9 @@ class Detector:
         block_height: Optional[int],
         tx_count: Optional[int],
         percent_full: Optional[int],
+        tx_fees_microstacks: Optional[int],
         consensus_hash: Optional[str],
+        tx_type_counts: Optional[Dict[str, int]],
         costs: Dict[str, int],
         cost_percents: Dict[str, float],
     ) -> None:
@@ -1845,7 +2120,9 @@ class Detector:
             "block_height": block_height,
             "tx_count": tx_count,
             "percent_full": percent_full,
+            "tx_fees_microstacks": tx_fees_microstacks,
             "consensus_hash": consensus_hash,
+            "tx_type_counts": tx_type_counts,
             "costs": costs,
             "costs_percent": cost_percents,
         }
@@ -1863,18 +2140,18 @@ class Detector:
         ts: float,
         block_header_hash: Optional[str],
         consensus_hash: Optional[str],
-    ) -> None:
+    ) -> Optional[Dict[str, object]]:
         if not isinstance(block_header_hash, str) or not block_header_hash:
-            return
+            return None
         pending = self.pending_execution_cost_by_block_hash.pop(block_header_hash, None)
         if not isinstance(pending, dict):
-            return
+            return None
         costs = pending.get("costs")
         cost_percents = pending.get("costs_percent")
         if not isinstance(costs, dict) or not costs:
-            return
+            return pending
         if not isinstance(cost_percents, dict):
-            return
+            return pending
         self.last_execution_costs = dict(costs)
         self.last_execution_costs_percent = dict(cost_percents)
         self.last_execution_cost_ts = ts
@@ -1911,6 +2188,7 @@ class Detector:
                 "costs_percent": self.last_execution_costs_percent,
             }
         )
+        return pending
 
     def snapshot(self, now: Optional[float] = None) -> Dict[str, object]:
         ts = now if now is not None else time.time()
@@ -2111,6 +2389,37 @@ class Detector:
             avg_block_interval_seconds = (
                 self.block_interval_total_seconds / float(self.block_interval_samples)
             )
+        validation_requests_5m = 0
+        if self.block_proposal_validation_requests:
+            cutoff = ts - 300.0
+            validation_requests_5m = sum(
+                1 for event_ts in self.block_proposal_validation_requests if event_ts >= cutoff
+            )
+        tenure_counts_list = list(self.tenure_block_counts)
+        current_tenure_metrics = tenure_counts_list[-1] if tenure_counts_list else None
+        tenure_window_totals = {
+            "blocks": 0,
+            "txs": 0,
+            "fees_microstx": 0,
+            "tx_type_counts": {key: 0 for key in TX_TYPE_KEYS},
+        }
+        for row in tenure_counts_list:
+            block_count = row.get("block_count")
+            tx_count_total = row.get("tx_count_total")
+            fee_microstx_total = row.get("fee_microstx_total")
+            if isinstance(block_count, int):
+                tenure_window_totals["blocks"] += block_count
+            if isinstance(tx_count_total, int):
+                tenure_window_totals["txs"] += tx_count_total
+            if isinstance(fee_microstx_total, int):
+                tenure_window_totals["fees_microstx"] += fee_microstx_total
+            row_types = row.get("tx_type_counts")
+            if isinstance(row_types, dict):
+                totals_types = tenure_window_totals["tx_type_counts"]
+                for key in TX_TYPE_KEYS:
+                    value = row_types.get(key)
+                    if isinstance(value, int) and value > 0:
+                        totals_types[key] += value
 
         return {
             "timestamp": ts,
@@ -2177,7 +2486,9 @@ class Detector:
             "recent_tenure_extends": recent_tenure_extends,
             "tenure_extend_history": tenure_extend_history,
             "tenure_change_history": tenure_change_history,
-            "recent_tenure_block_counts": list(self.tenure_block_counts),
+            "recent_tenure_block_counts": tenure_counts_list,
+            "current_tenure_metrics": current_tenure_metrics,
+            "tenure_window_totals": tenure_window_totals,
             "recent_confirmed_blocks": list(self.confirmed_block_history),
             "recent_confirmed_blocks_capacity": self.confirmed_block_history.maxlen,
             "node_tip_age_seconds": (
@@ -2213,6 +2524,13 @@ class Detector:
                 if self.last_signer_proposal_ts is None
                 else max(0.0, ts - self.last_signer_proposal_ts)
             ),
+            "last_signer_validation_ms": self.last_signer_validation_ms,
+            "last_signer_validation_age_seconds": (
+                None
+                if self.last_signer_validation_ts is None
+                else max(0.0, ts - self.last_signer_validation_ts)
+            ),
+            "block_proposal_validation_requests_5m": validation_requests_5m,
             "stale_chunks_window_count": len(self.stale_chunks),
             "open_proposals": open_proposals[:50],
             "recent_proposals": recent_proposals,

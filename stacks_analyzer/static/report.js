@@ -48,6 +48,22 @@
       } else if (key.startsWith("burnchain-reorg-")) {
         title = "Burnchain reorg detected";
         description = "The burnchain switched branches and may affect downstream behavior.";
+      } else if (key.startsWith("sortition-winner-rejected-")) {
+        title = "Sortition winner rejected";
+        description =
+          "The selected sortition winner was rejected and the burn block proceeded with a null-miner outcome.";
+      } else if (key.startsWith("node-block-proposal-rejected-")) {
+        title = "Node rejected block proposal";
+        description =
+          "The local stacks node rejected a proposal during validation; check reason and nearby signer responses.";
+      } else if (key.startsWith("miner-signers-rejected-")) {
+        title = "Miner proposal rejected by signers";
+        description =
+          "The miner reached signer rejection threshold for a proposal and retried after a pause.";
+      } else if (key.startsWith("signer-validation-slow-")) {
+        title = "Slow signer validation";
+        description =
+          "Signer-side proposal validation took longer than expected and may delay threshold progress.";
       } else if (key.startsWith("mempool-iteration-deadline")) {
         title = "Miner mempool iteration hit deadline";
         description =
