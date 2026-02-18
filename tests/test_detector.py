@@ -933,6 +933,59 @@ class TestDetector(unittest.TestCase):
         self.assertEqual(type_counts["contract_call"], 1)
         self.assertEqual(type_counts["contract_deploy"], 0)
 
+    def test_tenure_block_counts_backfill_metrics_when_validation_arrives_after_tip(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        block_header_hash = "bb" * 32
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tip_advanced",
+                ts=101.0,
+                fields={
+                    "consensus_hash": "late11",
+                    "block_header_hash": block_header_hash,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_block_proposal",
+                ts=102.0,
+                fields={
+                    "is_validated": True,
+                    "block_header_hash": block_header_hash,
+                    "tx_count": 3,
+                    "tx_fees_microstacks": 7777,
+                    "runtime": 100,
+                    "write_len": 100,
+                    "write_cnt": 1,
+                    "read_len": 100,
+                    "read_cnt": 1,
+                    "tx_type_counts": {
+                        "transfer": 2,
+                        "contract_call": 1,
+                    },
+                },
+            )
+        )
+
+        snapshot = detector.snapshot(now=103.0)
+        counts = snapshot["recent_tenure_block_counts"]
+        self.assertEqual(len(counts), 1)
+        self.assertEqual(counts[0]["consensus_hash"], "late11")
+        self.assertEqual(counts[0]["block_count"], 1)
+        self.assertEqual(counts[0]["tx_count_total"], 3)
+        self.assertEqual(counts[0]["fee_microstx_total"], 7777)
+        self.assertEqual(snapshot["latest_execution_cost_block_height"], None)
+        self.assertEqual(snapshot["latest_execution_cost_tx_count"], 3)
+        self.assertEqual(snapshot["recent_execution_costs"][0]["consensus_hash"], "late11")
+
     def test_tenure_block_counts_keeps_last_eight(self) -> None:
         detector = Detector(
             DetectorConfig(

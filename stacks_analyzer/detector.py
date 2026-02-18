@@ -169,6 +169,8 @@ class Detector:
         self.execution_cost_history: Deque[Dict[str, object]] = deque(maxlen=720)
         self.pending_execution_cost_by_block_hash: Dict[str, Dict[str, object]] = {}
         self.pending_execution_cost_order: Deque[str] = deque()
+        self.applied_execution_cost_block_hashes: Set[str] = set()
+        self.applied_execution_cost_order: Deque[str] = deque()
         self.pending_validation_contexts: Deque[Dict[str, object]] = deque(maxlen=128)
         self.signer_names: Dict[str, str] = signer_names or {}
 
@@ -2150,6 +2152,7 @@ class Detector:
             oldest_hash = self.pending_execution_cost_order.popleft()
             if oldest_hash != block_header_hash:
                 self.pending_execution_cost_by_block_hash.pop(oldest_hash, None)
+        self._apply_pending_execution_cost_if_tip_already_confirmed(block_header_hash)
 
     def _apply_confirmed_execution_cost(
         self,
@@ -2168,6 +2171,15 @@ class Detector:
             return pending
         if not isinstance(cost_percents, dict):
             return pending
+        self.applied_execution_cost_block_hashes.add(block_header_hash)
+        self.applied_execution_cost_order.append(block_header_hash)
+        while (
+            len(self.applied_execution_cost_order)
+            > self.config.hash_height_map_size * 2
+        ):
+            oldest_hash = self.applied_execution_cost_order.popleft()
+            if oldest_hash != block_header_hash:
+                self.applied_execution_cost_block_hashes.discard(oldest_hash)
         self.last_execution_costs = dict(costs)
         self.last_execution_costs_percent = dict(cost_percents)
         self.last_execution_cost_ts = ts
@@ -2205,6 +2217,98 @@ class Detector:
             }
         )
         return pending
+
+    def _apply_pending_execution_cost_if_tip_already_confirmed(
+        self, block_header_hash: str
+    ) -> None:
+        if (
+            not isinstance(block_header_hash, str)
+            or not block_header_hash
+            or block_header_hash in self.applied_execution_cost_block_hashes
+        ):
+            return
+
+        confirmed_tip_event: Optional[Dict[str, object]] = None
+        for event in reversed(self.confirmed_block_history):
+            if event.get("block_header_hash") != block_header_hash:
+                continue
+            if event.get("source") == "node_tip_advanced":
+                confirmed_tip_event = event
+                break
+        if not isinstance(confirmed_tip_event, dict):
+            return
+
+        tip_ts = confirmed_tip_event.get("ts")
+        apply_ts = tip_ts if isinstance(tip_ts, (int, float)) else time.time()
+        tip_consensus_hash = confirmed_tip_event.get("consensus_hash")
+        applied = self._apply_confirmed_execution_cost(
+            ts=apply_ts,
+            block_header_hash=block_header_hash,
+            consensus_hash=tip_consensus_hash
+            if isinstance(tip_consensus_hash, str)
+            else None,
+        )
+        if not isinstance(applied, dict):
+            return
+
+        resolved_consensus_hash = (
+            tip_consensus_hash
+            if isinstance(tip_consensus_hash, str) and tip_consensus_hash
+            else applied.get("consensus_hash")
+            if isinstance(applied.get("consensus_hash"), str)
+            else None
+        )
+        self._add_tenure_metrics_only(
+            consensus_hash=resolved_consensus_hash,
+            tx_count=applied.get("tx_count")
+            if isinstance(applied.get("tx_count"), int)
+            else None,
+            tx_fees_microstacks=applied.get("tx_fees_microstacks")
+            if isinstance(applied.get("tx_fees_microstacks"), int)
+            else None,
+            tx_type_counts=applied.get("tx_type_counts")
+            if isinstance(applied.get("tx_type_counts"), dict)
+            else None,
+        )
+
+    def _add_tenure_metrics_only(
+        self,
+        consensus_hash: Optional[str],
+        tx_count: Optional[int] = None,
+        tx_fees_microstacks: Optional[int] = None,
+        tx_type_counts: Optional[Dict[str, int]] = None,
+    ) -> None:
+        normalized_hash = (
+            consensus_hash if isinstance(consensus_hash, str) and consensus_hash else None
+        )
+        if normalized_hash is None and isinstance(self.current_consensus_hash, str):
+            normalized_hash = self.current_consensus_hash
+        if not isinstance(normalized_hash, str) or not normalized_hash:
+            return
+
+        target_row: Optional[Dict[str, object]] = None
+        for row in reversed(self.tenure_block_counts):
+            if row.get("consensus_hash") == normalized_hash:
+                target_row = row
+                break
+        if not isinstance(target_row, dict):
+            return
+
+        if isinstance(tx_count, int):
+            target_row["tx_count_total"] = int(target_row.get("tx_count_total") or 0) + tx_count
+        if isinstance(tx_fees_microstacks, int):
+            target_row["fee_microstx_total"] = int(
+                target_row.get("fee_microstx_total") or 0
+            ) + tx_fees_microstacks
+        if isinstance(tx_type_counts, dict):
+            current_type_counts = target_row.get("tx_type_counts")
+            if not isinstance(current_type_counts, dict):
+                current_type_counts = {key: 0 for key in TX_TYPE_KEYS}
+            for key in TX_TYPE_KEYS:
+                increment = tx_type_counts.get(key)
+                if isinstance(increment, int) and increment > 0:
+                    current_type_counts[key] = int(current_type_counts.get(key) or 0) + increment
+            target_row["tx_type_counts"] = current_type_counts
 
     def snapshot(self, now: Optional[float] = None) -> Dict[str, object]:
         ts = now if now is not None else time.time()

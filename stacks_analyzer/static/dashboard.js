@@ -671,8 +671,8 @@
           const xLabelHash = tenure.consensus_hash === "unknown" ? "?" : tenure.consensus_hash.slice(0, 6);
           const burnHeightLabel =
             tenure.burn_height === null || tenure.burn_height === undefined
-              ? "burn ?"
-              : "burn " + String(tenure.burn_height);
+              ? "?"
+              : String(tenure.burn_height);
           return (
             "<rect x='" +
             xBar.toFixed(2) +
