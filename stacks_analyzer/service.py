@@ -718,6 +718,33 @@ class MonitoringService:
                 parts.append("height=%s" % block_height)
             if parts:
                 message = "%s | %s" % (message, " ".join(parts))
+        elif kind == "signer_block_validation_submitted":
+            sig = data.get("signer_signature_hash")
+            block_height = data.get("block_height")
+            message = "Proposal submitted for validation"
+            parts = []
+            if isinstance(sig, str) and sig:
+                parts.append(self._short_id(sig, 12))
+            if block_height is not None:
+                parts.append("height=%s" % block_height)
+            if parts:
+                message = "%s | %s" % (message, " ".join(parts))
+        elif kind == "signer_pending_block_validation_waiting_parent":
+            sig = data.get("signer_signature_hash")
+            parent_block_id = data.get("parent_block_id")
+            message = "Validation waiting on parent block"
+            parts = []
+            if isinstance(sig, str) and sig:
+                parts.append(self._short_id(sig, 12))
+            if isinstance(parent_block_id, str) and parent_block_id:
+                parts.append("parent=%s" % self._short_id(parent_block_id, 12))
+            if parts:
+                message = "%s | %s" % (message, " ".join(parts))
+        elif kind == "signer_pending_block_validation_found":
+            sig = data.get("signer_signature_hash")
+            message = "Pending validation retried"
+            if isinstance(sig, str) and sig:
+                message = "%s | %s" % (message, self._short_id(sig, 12))
         elif kind == "signer_block_rejection":
             sig = data.get("signer_signature_hash")
             reason = data.get("reject_reason")
@@ -802,6 +829,9 @@ class MonitoringService:
             if block_height is not None and data.get("block_height") == block_height:
                 if event.get("kind") in (
                     "signer_block_proposal",
+                    "signer_block_validation_submitted",
+                    "signer_pending_block_validation_waiting_parent",
+                    "signer_pending_block_validation_found",
                     "signer_block_acceptance",
                     "signer_block_rejection",
                     "signer_rejection_threshold_reached",

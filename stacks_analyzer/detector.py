@@ -20,7 +20,7 @@ EXECUTION_COST_LIMITS = {
     "read_cnt": 15_000,
 }
 MEMPOOL_EMPTY_ALERT_SECONDS = 90
-SLOW_SIGNER_VALIDATION_MS = 2_000
+SLOW_SIGNER_VALIDATION_MS = 5_000
 TX_TYPE_KEYS = (
     "transfer",
     "contract_call",
@@ -88,6 +88,7 @@ class SortitionCommitState:
     burn_height: int
     sortition_position: Optional[int]
     parent_burn_block: Optional[int]
+    burn_fee: Optional[int]
     ts: float
 
 
@@ -485,6 +486,9 @@ class Detector:
                             else None,
                             parent_burn_block=event.fields.get("parent_burn_block")
                             if isinstance(event.fields.get("parent_burn_block"), int)
+                            else None,
+                            burn_fee=event.fields.get("burn_fee")
+                            if isinstance(event.fields.get("burn_fee"), int)
                             else None,
                             ts=event.ts,
                         )
@@ -1771,6 +1775,7 @@ class Detector:
             "stacks_block_burn_height": stacks_block_burn_height,
             "sortition_position": commit.sortition_position,
             "parent_burn_block": commit.parent_burn_block,
+            "burn_fee": commit.burn_fee,
             "is_winner": bool(winner_txid and commit.commit_txid == winner_txid),
             "ts": commit.ts,
         }
@@ -1950,6 +1955,14 @@ class Detector:
             normalized_hash = self.current_consensus_hash
         if not isinstance(normalized_hash, str) or not normalized_hash:
             return
+        mapped_burn_height = self.burn_height_by_consensus_hash.get(normalized_hash)
+        if not isinstance(mapped_burn_height, int):
+            mapped_burn_height = (
+                self.current_consensus_burn_height
+                if self.current_consensus_hash == normalized_hash
+                and isinstance(self.current_consensus_burn_height, int)
+                else None
+            )
 
         if (
             self.tenure_block_counts
@@ -1978,6 +1991,8 @@ class Detector:
                     if isinstance(increment, int) and increment > 0:
                         current_type_counts[key] = int(current_type_counts.get(key) or 0) + increment
                 current["tx_type_counts"] = current_type_counts
+            if isinstance(mapped_burn_height, int):
+                current["burn_height"] = mapped_burn_height
             current["end_ts"] = ts
             return
 
@@ -1996,6 +2011,7 @@ class Detector:
                     tx_fees_microstacks if isinstance(tx_fees_microstacks, int) else 0
                 ),
                 "tx_type_counts": initial_type_counts,
+                "burn_height": mapped_burn_height,
                 "start_ts": ts,
                 "end_ts": ts,
             }
@@ -2343,6 +2359,12 @@ class Detector:
                     ),
                 )
             ]
+            total_burn_fee = 0
+            has_burn_fee = False
+            for commit in round_state.commits:
+                if isinstance(commit.burn_fee, int):
+                    total_burn_fee += commit.burn_fee
+                    has_burn_fee = True
             recent_sortition_details.append(
                 {
                     "burn_height": burn_height,
@@ -2356,6 +2378,7 @@ class Detector:
                     "winner_ts": round_state.winner_ts,
                     "rejected_ts": round_state.rejected_ts,
                     "commits": commits,
+                    "total_burn_fee": total_burn_fee if has_burn_fee else None,
                 }
             )
 

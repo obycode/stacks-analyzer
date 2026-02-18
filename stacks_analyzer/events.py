@@ -54,6 +54,12 @@ NODE_REJECTED_BLOCK_PROPOSAL_RE = re.compile(
 SIGNERS_REJECTED_RE = re.compile(
     r"Error while gathering signatures:\s*SignersRejected\.\s*Will try mining again in\s+(?P<pause_ms>\d+)"
 )
+SIGNER_PENDING_VALIDATION_RE = re.compile(
+    r"Found a pending block validation:\s*(?P<signer_signature_hash>[0-9a-fA-F]+)"
+)
+IGNORED_SIGNER_RESPONSE_REJECT_REASONS = {
+    "SortitionViewMismatch",
+}
 
 
 def extract_timestamp(line: str) -> float:
@@ -440,6 +446,7 @@ class LogParser:
                 burn_height_match = ACCEPTED_BURN_HEIGHT_RE.search(line)
                 commit_match = LEADER_BLOCK_COMMIT_RE.search(line)
                 parent_burn_block = extract_field(line, "parent_burn_block")
+                burn_fee = extract_field(line, "burn_fee")
                 events.append(
                     ParsedEvent(
                         source=source,
@@ -464,6 +471,7 @@ class LogParser:
                             "parent_burn_block": (
                                 int(parent_burn_block) if parent_burn_block else None
                             ),
+                            "burn_fee": int(burn_fee) if burn_fee else None,
                         },
                         line=line,
                     )
@@ -671,6 +679,61 @@ class LogParser:
                             "burn_height": int(burn_height) if burn_height else None,
                             "block_id": extract_field(line, "block_id"),
                             "consensus_hash": extract_field(line, "consensus_hash"),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "submitting block proposal for validation" in line:
+                signature_hash = extract_field(line, "signer_signature_hash")
+                block_height = extract_field(line, "block_height")
+                burn_height = extract_field(line, "burn_height")
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_block_validation_submitted",
+                        ts=ts,
+                        fields={
+                            "signer_signature_hash": signature_hash,
+                            "block_height": int(block_height) if block_height else None,
+                            "burn_height": int(burn_height) if burn_height else None,
+                            "block_id": extract_field(line, "block_id"),
+                        },
+                        line=line,
+                    )
+                )
+
+            if (
+                "Have not processed parent of block proposal yet, inserting pending block validation"
+                in line
+            ):
+                signature_hash = extract_field(line, "signer_signature_hash")
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_pending_block_validation_waiting_parent",
+                        ts=ts,
+                        fields={
+                            "signer_signature_hash": signature_hash,
+                            "parent_block_id": extract_field(line, "parent_block_id"),
+                        },
+                        line=line,
+                    )
+                )
+
+            if "Found a pending block validation:" in line:
+                pending_match = SIGNER_PENDING_VALIDATION_RE.search(line)
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_pending_block_validation_found",
+                        ts=ts,
+                        fields={
+                            "signer_signature_hash": (
+                                pending_match.group("signer_signature_hash")
+                                if pending_match
+                                else None
+                            ),
                         },
                         line=line,
                     )
@@ -898,19 +961,25 @@ class LogParser:
             if "Broadcasting block response to stacks node:" in line:
                 signature_hash = extract_field(line, "signer_signature_hash")
                 reject_reason = extract_field(line, "reject_reason")
-                events.append(
-                    ParsedEvent(
-                        source=source,
-                        kind="signer_block_response",
-                        ts=ts,
-                        fields={
-                            "signer_signature_hash": signature_hash,
-                            "reject_reason": reject_reason,
-                            "accepted": "Accepted(" in line,
-                        },
-                        line=line,
+                accepted = "Accepted(" in line
+                if not (
+                    not accepted
+                    and isinstance(reject_reason, str)
+                    and reject_reason in IGNORED_SIGNER_RESPONSE_REJECT_REASONS
+                ):
+                    events.append(
+                        ParsedEvent(
+                            source=source,
+                            kind="signer_block_response",
+                            ts=ts,
+                            fields={
+                                "signer_signature_hash": signature_hash,
+                                "reject_reason": reject_reason,
+                                "accepted": accepted,
+                            },
+                            line=line,
+                        )
                     )
-                )
 
             if " ERROR " in line or " WARN " in line:
                 events.append(

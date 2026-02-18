@@ -143,6 +143,11 @@
         .join(" | ");
     }
 
+    function formatSats(value) {
+      if (!Number.isFinite(Number(value))) return "-";
+      return Number(value).toLocaleString(undefined) + " sats";
+    }
+
     function formatWindowTick(seconds) {
       if (!Number.isFinite(seconds) || seconds <= 0) return "now";
       if (seconds < 60) return Math.round(seconds) + "s";
@@ -547,7 +552,7 @@
 
       const topPad = 8;
       const rightPad = 36;
-      const bottomPad = 16;
+      const bottomPad = 30;
       const leftPad = 30;
       const plotWidth = width - leftPad - rightPad;
       const plotHeight = height - topPad - bottomPad;
@@ -663,7 +668,11 @@
             })
             .join("");
 
-          const xLabel = tenure.consensus_hash === "unknown" ? "?" : tenure.consensus_hash.slice(0, 6);
+          const xLabelHash = tenure.consensus_hash === "unknown" ? "?" : tenure.consensus_hash.slice(0, 6);
+          const burnHeightLabel =
+            tenure.burn_height === null || tenure.burn_height === undefined
+              ? "burn ?"
+              : "burn " + String(tenure.burn_height);
           return (
             "<rect x='" +
             xBar.toFixed(2) +
@@ -680,9 +689,16 @@
             "<text class='chart-axis' x='" +
             xCenter.toFixed(2) +
             "' y='" +
-            (height - 2) +
+            (height - 12) +
             "' text-anchor='middle' fill='#94a3b8'>" +
-            escapeHtml(xLabel) +
+            escapeHtml(xLabelHash) +
+            "</text>" +
+            "<text class='chart-axis' x='" +
+            xCenter.toFixed(2) +
+            "' y='" +
+            (height - 2) +
+            "' text-anchor='middle' fill='#64748b'>" +
+            escapeHtml(burnHeightLabel) +
             "</text>"
           );
         })
@@ -811,6 +827,10 @@
         }
         const latestTs = candidateTs.length ? Math.max(...candidateTs) : null;
         const ageText = latestTs ? fmtAge(Math.max(0, nowEpoch - latestTs)) : "";
+        const totalBurnFee = round.total_burn_fee;
+        const totalBurnFeeLabel = Number.isFinite(Number(totalBurnFee))
+          ? "total burn " + formatSats(totalBurnFee)
+          : "";
         const commitHtml = sortedCommits.length
           ? sortedCommits.map((item) => {
               const commitClass = item.is_winner ? "commit commit-winner" : "commit";
@@ -825,8 +845,12 @@
               const parentBurnLabel = parentBurn !== null && parentBurn !== undefined
                 ? hiroBtcBlockLink(parentBurn, escapeHtml(parentBurn))
                 : "-";
+              const burnFee = item.burn_fee;
+              const burnFeeLabel = Number.isFinite(Number(burnFee))
+                ? formatSats(burnFee)
+                : "-";
               const minerBadge = "<span class='miner-line'><span class='miner-dot' style='--miner-color: " + color + "'></span><span class='miner-tag' style='--miner-color: " + color + "'>" + escapeHtml(tag) + "</span></span>";
-              return "<div class='" + commitClass + "' style='border-left: 3px solid " + color + ";'><div class='mono'>" + minerBadge + " " + addressHtml + "</div><div class='mono'>commit " + commitLink + "</div><div class='mono'>parent burn block " + parentBurnLabel + "</div></div>";
+              return "<div class='" + commitClass + "' style='border-left: 3px solid " + color + ";'><div class='mono'>" + minerBadge + " " + addressHtml + "</div><div class='mono'>commit " + commitLink + "</div><div class='mono'>parent burn block " + parentBurnLabel + "</div><div class='mono'>burn fee " + escapeHtml(burnFeeLabel) + "</div></div>";
             }).join("")
           : "<div class='commit'>No commits captured for this burn height.</div>";
         const burnLabel = "Burn #" + escapeHtml(round.burn_height);
@@ -838,7 +862,10 @@
             escapeHtml(outcome) +
             "</span>";
         }
-        return "<div class='round'><div class='round-head'><span>" + burnLabel + ageLabel + "</span>" + badgeHtml + "</div><div class='commit-list'>" + commitHtml + "</div></div>";
+        const totalsHtml = totalBurnFeeLabel
+          ? "<div class='round-summary'>" + escapeHtml(totalBurnFeeLabel) + "</div>"
+          : "";
+        return "<div class='round'><div class='round-head'><span>" + burnLabel + ageLabel + "</span>" + badgeHtml + "</div>" + totalsHtml + "<div class='commit-list'>" + commitHtml + "</div></div>";
       }).join("");
     }
 

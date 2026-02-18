@@ -87,7 +87,7 @@ Additional warning/info alerts:
 - sortition winner rejected (null-miner reason surfaced explicitly).
 - node-side block proposal rejected (includes reject reason and proposal id when present).
 - miner signers-rejected retry events (includes retry pause).
-- slow signer block validation (`validation_time_ms` > 2000ms).
+- slow signer block validation (`validation_time_ms` > 5000ms).
 
 Tenure fee/tx accounting:
 - Confirmed-fee tracking uses `Participant: validated anchored block` fields,

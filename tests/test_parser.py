@@ -161,6 +161,103 @@ class TestLogParser(unittest.TestCase):
         self.assertEqual(event.fields["validation_time_ms"], 62)
         self.assertEqual(event.fields["size"], 180)
 
+    def test_parse_signer_block_validation_submitted(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 17 13:13:54 host stacks-signer[264516]: INFO [1771352034.093054] "
+            "Cycle #129 Dry-Run signer: submitting block proposal for validation, "
+            "signer_signature_hash: 09ab1cc7d4d34642c629fd0df753fc1b9e7654ff7c2b5d65b49a22d689502abb, "
+            "block_id: 5761230494dcc847c23bc424905095e47362b0175d2f6ec663ad6484d528e503, "
+            "block_height: 6622190, burn_height: 937112"
+        )
+
+        events = parser.parse_line("signer", line)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.kind, "signer_block_validation_submitted")
+        self.assertEqual(
+            event.fields["signer_signature_hash"],
+            "09ab1cc7d4d34642c629fd0df753fc1b9e7654ff7c2b5d65b49a22d689502abb",
+        )
+        self.assertEqual(event.fields["block_height"], 6622190)
+        self.assertEqual(event.fields["burn_height"], 937112)
+        self.assertEqual(
+            event.fields["block_id"],
+            "5761230494dcc847c23bc424905095e47362b0175d2f6ec663ad6484d528e503",
+        )
+
+    def test_parse_signer_pending_block_validation_events(self) -> None:
+        parser = LogParser()
+        waiting_line = (
+            "Feb 17 13:14:32 host stacks-signer[1039499]: INFO [1771352072.169783] "
+            "Cycle #129 Dry-Run signer: Have not processed parent of block proposal yet, "
+            "inserting pending block validation and will try again later, "
+            "signer_signature_hash: 715c2b78531d3fa3c5f092ebf5bfcdbcc1fa7481a5b1181a88b62aa10ea14a62, "
+            "parent_block_id: 77d426c9572356e47a2581077c3aafc1159738cb25611bc05807b847d46e3f4a"
+        )
+        found_line = (
+            "Feb 17 13:14:32 host stacks-signer[1039499]: INFO [1771352072.170144] "
+            "Cycle #129 Dry-Run signer: Found a pending block validation: "
+            "715c2b78531d3fa3c5f092ebf5bfcdbcc1fa7481a5b1181a88b62aa10ea14a62"
+        )
+
+        waiting_events = parser.parse_line("signer", waiting_line)
+        self.assertEqual(len(waiting_events), 1)
+        self.assertEqual(
+            waiting_events[0].kind, "signer_pending_block_validation_waiting_parent"
+        )
+        self.assertEqual(
+            waiting_events[0].fields["signer_signature_hash"],
+            "715c2b78531d3fa3c5f092ebf5bfcdbcc1fa7481a5b1181a88b62aa10ea14a62",
+        )
+        self.assertEqual(
+            waiting_events[0].fields["parent_block_id"],
+            "77d426c9572356e47a2581077c3aafc1159738cb25611bc05807b847d46e3f4a",
+        )
+
+        found_events = parser.parse_line("signer", found_line)
+        self.assertEqual(len(found_events), 1)
+        self.assertEqual(found_events[0].kind, "signer_pending_block_validation_found")
+        self.assertEqual(
+            found_events[0].fields["signer_signature_hash"],
+            "715c2b78531d3fa3c5f092ebf5bfcdbcc1fa7481a5b1181a88b62aa10ea14a62",
+        )
+
+    def test_ignore_sortition_view_mismatch_signer_block_response(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 17 13:13:56 host stacks-signer[1]: INFO [1771352036.143587] "
+            "Cycle #129 Dry-Run signer: Broadcasting block response to stacks node: "
+            "Rejected(BlockRejection { reason: \"The block was rejected due to a mismatch "
+            "with expected sortition view.\", reason_code: SortitionViewMismatch, "
+            "signer_signature_hash: 09ab1cc7d4d34642c629fd0df753fc1b9e7654ff7c2b5d65b49a22d689502abb, "
+            "response_data: BlockResponseData { version: 4, reject_reason: "
+            "SortitionViewMismatch } })"
+        )
+
+        events = parser.parse_line("signer", line)
+        response_events = [e for e in events if e.kind == "signer_block_response"]
+        self.assertEqual(len(response_events), 0)
+
+    def test_parse_signer_block_response_rejected_non_ignored_reason(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 06 04:37:44 host stacks-signer[1]: INFO [1770370664.324761] "
+            "Cycle #129 Dry-Run signer: Broadcasting block response to stacks node: "
+            "Rejected(BlockRejection { reason: \"The block was rejected.\", "
+            "reason_code: NotLatestSortitionWinner, signer_signature_hash: f98fab, "
+            "response_data: BlockResponseData { version: 4, "
+            "reject_reason: NotLatestSortitionWinner } })"
+        )
+
+        events = parser.parse_line("signer", line)
+        response_events = [e for e in events if e.kind == "signer_block_response"]
+        self.assertEqual(len(response_events), 1)
+        self.assertEqual(
+            response_events[0].fields["reject_reason"], "NotLatestSortitionWinner"
+        )
+        self.assertFalse(response_events[0].fields["accepted"])
+
     def test_parse_node_block_proposal_rejected(self) -> None:
         parser = LogParser()
         line = (
@@ -309,7 +406,7 @@ class TestLogParser(unittest.TestCase):
             "e0e8e9eb9315bbd3710887cc907059e10a9e7f000918465f65070d9756f99757 "
             "at 934988,710, apparent_sender: bc1qxlne4qmmgpc6rlrvrdyjprnay9q6ykg98gz2j3, "
             "stacks_block_hash: de3b7737fae28c2ca5375aea614a129a5e3d03c058c3ab0a8264b8bd7fc04418, "
-            "parent_burn_block: 934987"
+            "parent_burn_block: 934987, burn_fee: 80000"
         )
         winner_line = (
             "Feb 04 08:01:05 host stacks-node[1]: INFO [1770210065.697281] "
@@ -339,6 +436,7 @@ class TestLogParser(unittest.TestCase):
             commit_events[0].fields["commit_txid"],
             "e0e8e9eb9315bbd3710887cc907059e10a9e7f000918465f65070d9756f99757",
         )
+        self.assertEqual(commit_events[0].fields["burn_fee"], 80000)
 
         winner_events = parser.parse_line("node", winner_line)
         self.assertEqual(len(winner_events), 1)

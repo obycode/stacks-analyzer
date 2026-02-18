@@ -593,14 +593,14 @@ class TestDetector(unittest.TestCase):
                 ts=100.0,
                 fields={
                     "signer_signature_hash": "f98fab91d65e",
-                    "validation_time_ms": 2400,
+                    "validation_time_ms": 5400,
                 },
             )
         )
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0].key, "signer-validation-slow-f98fab91d65e")
         self.assertEqual(alerts[0].severity, "warning")
-        self.assertIn("2400ms", alerts[0].message)
+        self.assertIn("5400ms", alerts[0].message)
 
     def test_new_block_event_closes_proposal_and_updates_heights(self) -> None:
         detector = Detector(
@@ -1116,6 +1116,7 @@ class TestDetector(unittest.TestCase):
                     "apparent_sender": "bc1qminer1",
                     "stacks_block_hash": "bb" * 32,
                     "parent_burn_block": 934987,
+                    "burn_fee": 80_000,
                 },
             )
         )
@@ -1131,6 +1132,7 @@ class TestDetector(unittest.TestCase):
                     "apparent_sender": "bc1qwinner",
                     "stacks_block_hash": "bb" * 32,
                     "parent_burn_block": 934987,
+                    "burn_fee": 90_000,
                 },
             )
         )
@@ -1165,6 +1167,13 @@ class TestDetector(unittest.TestCase):
         self.assertEqual(len(snapshot["recent_sortition_details"]), 1)
         self.assertEqual(snapshot["recent_sortition_details"][0]["burn_height"], 934988)
         self.assertEqual(len(snapshot["recent_sortition_details"][0]["commits"]), 2)
+        self.assertEqual(snapshot["recent_sortition_details"][0]["total_burn_fee"], 170000)
+        self.assertEqual(
+            snapshot["recent_sortition_details"][0]["commits"][0]["burn_fee"], 80000
+        )
+        self.assertEqual(
+            snapshot["recent_sortition_details"][0]["commits"][1]["burn_fee"], 90000
+        )
         self.assertEqual(snapshot["active_miner"]["current_miner_pkh"], "pkh123")
         self.assertEqual(snapshot["current_consensus_burn_height"], 934988)
         self.assertEqual(
