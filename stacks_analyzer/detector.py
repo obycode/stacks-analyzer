@@ -2773,6 +2773,23 @@ class Detector:
         self.last_alert_ts[key] = ts
         alerts.append(Alert(key=key, severity=severity, message=message, ts=ts))
 
+    def rebase_for_live_start(self, ts: float) -> None:
+        """Prevent replay/prefetch state from immediately triggering stale alerts."""
+        if self.last_node_tip_ts is not None:
+            self.last_node_tip_ts = ts
+        if self.last_signer_proposal_ts is not None:
+            self.last_signer_proposal_ts = ts
+        if (
+            self.last_mempool_stop_reason == "NoMoreCandidates"
+            and self.last_mempool_ready_txs == 0
+            and self.last_mempool_ready_ts is not None
+        ):
+            self.last_mempool_ready_ts = ts
+        for state in self.proposals.values():
+            if state.threshold_ts is None:
+                state.start_ts = ts
+        self.active_stalls.clear()
+
     def _set_current_consensus(
         self, consensus_hash: str, burn_height: Optional[int] = None
     ) -> None:

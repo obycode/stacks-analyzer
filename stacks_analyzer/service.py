@@ -44,6 +44,7 @@ class MonitoringService:
         self.replay_sources: Set[str] = set()
         self.suppress_notifications: bool = False
         self.prefetch_sources: Set[str] = set()
+        self.awaiting_first_live_after_prefetch: bool = False
         if config.mode == "files":
             if config.node_log_path:
                 self.replay_sources.add("node")
@@ -51,6 +52,8 @@ class MonitoringService:
                 self.replay_sources.add("signer")
         elif config.mode == "journalctl":
             self.prefetch_sources = {"node", "signer"}
+            self.suppress_notifications = True
+            self.detector.suppress_alerts = True
         self.state_lock = threading.Lock()
         self.recent_alerts: Deque[Dict[str, Any]] = deque(maxlen=200)
         self.recent_reports: Deque[Dict[str, Any]] = deque(maxlen=200)
@@ -235,10 +238,18 @@ class MonitoringService:
             if source in self.prefetch_sources:
                 self.prefetch_sources.discard(source)
             if not self.prefetch_sources:
-                self.suppress_notifications = False
-                with self.state_lock:
-                    self.detector.suppress_alerts = False
+                # Keep suppression active until the first live (post-prefetch) line
+                # is actually processed, preventing startup stall flaps from sending.
+                self.awaiting_first_live_after_prefetch = True
             return
+
+        if self.awaiting_first_live_after_prefetch:
+            self.awaiting_first_live_after_prefetch = False
+            live_start_ts = self._state_now()
+            self.suppress_notifications = False
+            with self.state_lock:
+                self.detector.rebase_for_live_start(live_start_ts)
+                self.detector.suppress_alerts = False
 
         events = self.parser.parse_line(source, line)
         alert_batch = []
