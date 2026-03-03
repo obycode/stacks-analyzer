@@ -65,6 +65,7 @@ class MonitoringService:
         self.notifier: Optional[TelegramNotifier] = None
         if config.telegram.enabled:
             self.notifier = TelegramNotifier(config.telegram.token, config.telegram.chat_id)
+        self.telegram_critical_open_keys: Set[str] = set()
 
         self.dashboard_server: Optional[DashboardServer] = None
         if config.web.enabled:
@@ -370,9 +371,16 @@ class MonitoringService:
         if (
             self.notifier
             and not self.suppress_notifications
-            and self._should_notify_telegram_for_alert(alert)
         ):
-            self.notifier.send(rendered)
+            resolved_key = self._resolved_alert_key(alert.key)
+            if resolved_key and resolved_key in self.telegram_critical_open_keys:
+                resolved_message = "[RESOLVED][CRITICAL] %s" % alert.message
+                if self.notifier.send(resolved_message):
+                    self.telegram_critical_open_keys.discard(resolved_key)
+            elif self._should_notify_telegram_for_alert(alert):
+                sent = self.notifier.send(rendered)
+                if sent and str(alert.severity).lower() == "critical":
+                    self.telegram_critical_open_keys.add(alert.key)
 
     def _history_api(self, params: Dict[str, list]) -> Dict[str, Any]:
         if self.history_store is None:
@@ -1643,6 +1651,15 @@ class MonitoringService:
             0,
         )
         return current >= minimum
+
+    @staticmethod
+    def _resolved_alert_key(key: object) -> Optional[str]:
+        if not isinstance(key, str):
+            return None
+        if not key.endswith("-recovered"):
+            return None
+        base = key[: -len("-recovered")]
+        return base or None
 
     def _state_now(self) -> float:
         now = time.time()
