@@ -902,7 +902,10 @@ class LogParser:
                     )
                 )
 
-            if "Received block acceptance and have reached the threshold" in line:
+            if (
+                "Received block acceptance and have reached the threshold" in line
+                or "have reached the block acceptance threshold" in line
+            ):
                 signature_hash = extract_field(line, "signer_signature_hash")
                 percent = extract_field(line, "percent_approved")
                 block_height = extract_field(line, "block_height")

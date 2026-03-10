@@ -140,6 +140,26 @@ class TestLogParser(unittest.TestCase):
         self.assertEqual(event.fields["total_weight"], 3912)
         self.assertAlmostEqual(event.fields["percent_rejected"], 32.5)
 
+    def test_parse_signer_threshold_reached_new_format(self) -> None:
+        # signer.rs:2103 uses a different log message than the older signer.rs:1889
+        parser = LogParser()
+        line = (
+            "2026-03-08T07:50:16-04:00 host stacks-signer[1]: INFO [1772970616.756595] "
+            "[stacks-signer/src/v0/signer.rs:2103] [signer_runloop:30000] "
+            "Cycle #130 Dry-Run signer: have reached the block acceptance threshold, "
+            "signer_signature_hash: 882ac9d8, "
+            "consensus_hash: f8b2a258, block_height: 7039535, "
+            "total_weight_approved: 2724, total_weight: 3731, percent_approved: 73.0"
+        )
+
+        events = parser.parse_line("signer", line)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.kind, "signer_threshold_reached")
+        self.assertEqual(event.fields["signer_signature_hash"], "882ac9d8")
+        self.assertEqual(event.fields["block_height"], 7039535)
+        self.assertAlmostEqual(event.fields["percent_approved"], 73.0)
+
     def test_parse_signer_block_validate_ok(self) -> None:
         parser = LogParser()
         line = (
