@@ -840,7 +840,10 @@ class LogParser:
                     )
                 )
 
-            if "Received block rejection and have reached the rejection threshold" in line:
+            if (
+                "Received block rejection and have reached the rejection threshold" in line
+                or "have reached the block rejection threshold" in line
+            ):
                 signature_hash = extract_field(line, "signer_signature_hash")
                 total_weight_rejected = extract_field(line, "total_weight_rejected")
                 total_weight = extract_field(line, "total_weight")
