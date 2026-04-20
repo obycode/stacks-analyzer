@@ -1208,6 +1208,15 @@ class Detector:
         for signature_hash, state in list(self.proposals.items()):
             age = ts - state.start_ts
             if state.threshold_ts is None and age > self.config.proposal_timeout_seconds:
+                # If the chain has already advanced past this proposal's height,
+                # the proposal is moot — the network moved on without it, which
+                # is normal for rejected/superseded proposals.  Skip the alert.
+                if (
+                    isinstance(state.block_height, int)
+                    and isinstance(self.current_stacks_block_height, int)
+                    and self.current_stacks_block_height > state.block_height
+                ):
+                    continue
                 boundary_match = self._match_boundary_burn_for_state(state)
                 if boundary_match is not None:
                     burn_ts, burn_height = boundary_match
@@ -1248,23 +1257,63 @@ class Detector:
                         ts=ts,
                     )
                 else:
-                    if state.block_height is not None:
-                        message = (
-                            "Proposal %s (height %d) has no threshold confirmation after %.0fs"
-                            % (signature_hash[:12], state.block_height, age)
+                    reject_reasons = state.reject_reasons
+                    reject_count = len(state.reject_signers)
+                    if reject_reasons:
+                        # Proposal was actively rejected by signers but we never
+                        # received aggregated percent data (percent_rejected=null),
+                        # so the rejection threshold was never detected.  Downgrade
+                        # to warning and include the rejection context so this
+                        # doesn't page as an unexplained stall.
+                        reason_label = ", ".join(sorted(reject_reasons))
+                        if state.block_height is not None:
+                            message = (
+                                "Proposal %s (height %d) timed out with active rejections"
+                                " (reason=%s, reject_signers=%d, age=%.0fs)"
+                                % (
+                                    signature_hash[:12],
+                                    state.block_height,
+                                    reason_label,
+                                    reject_count,
+                                    age,
+                                )
+                            )
+                        else:
+                            message = (
+                                "Proposal %s timed out with active rejections"
+                                " (reason=%s, reject_signers=%d, age=%.0fs)"
+                                % (
+                                    signature_hash[:12],
+                                    reason_label,
+                                    reject_count,
+                                    age,
+                                )
+                            )
+                        self._emit_alert(
+                            alerts=alerts,
+                            key="proposal-timeout-%s" % signature_hash,
+                            severity="warning",
+                            message=message,
+                            ts=ts,
                         )
                     else:
-                        message = (
-                            "Proposal %s has no threshold confirmation after %.0fs"
-                            % (signature_hash[:12], age)
+                        if state.block_height is not None:
+                            message = (
+                                "Proposal %s (height %d) has no threshold confirmation after %.0fs"
+                                % (signature_hash[:12], state.block_height, age)
+                            )
+                        else:
+                            message = (
+                                "Proposal %s has no threshold confirmation after %.0fs"
+                                % (signature_hash[:12], age)
+                            )
+                        self._emit_alert(
+                            alerts=alerts,
+                            key="proposal-timeout-%s" % signature_hash,
+                            severity="critical",
+                            message=message,
+                            ts=ts,
                         )
-                    self._emit_alert(
-                        alerts=alerts,
-                        key="proposal-timeout-%s" % signature_hash,
-                        severity="critical",
-                        message=message,
-                        ts=ts,
-                    )
 
             # Keep memory bounded for older entries even if push lines are missing.
             if age > max(self.config.proposal_timeout_seconds * 4, 300):
