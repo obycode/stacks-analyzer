@@ -51,6 +51,8 @@ class DetectorConfig:
     tenure_extend_history_size: int = 64
     proposal_history_size: int = 400
     burn_block_boundary_window_seconds: int = 15
+    expensive_call_percent_threshold: float = 20.0
+    expensive_call_history_size: int = 200
 
 
 @dataclass
@@ -172,6 +174,11 @@ class Detector:
         self.applied_execution_cost_block_hashes: Set[str] = set()
         self.applied_execution_cost_order: Deque[str] = deque()
         self.pending_validation_contexts: Deque[Dict[str, object]] = deque(maxlen=128)
+        self.expensive_contract_calls: Deque[Dict[str, object]] = deque(
+            maxlen=self.config.expensive_call_history_size
+        )
+        self.expensive_contract_call_txids: Set[str] = set()
+        self.expensive_contract_call_txid_order: Deque[str] = deque()
         self.signer_names: Dict[str, str] = signer_names or {}
 
         self.processed_lines: Dict[str, int] = defaultdict(int)
@@ -336,6 +343,9 @@ class Detector:
 
         elif event.kind == "node_include_tx":
             self._track_validation_payload(event)
+
+        elif event.kind == "node_contract_call_processed":
+            self._track_expensive_contract_call(event)
 
         elif event.kind == "node_mempool_iteration":
             considered_txs = event.fields.get("considered_txs")
@@ -2083,6 +2093,81 @@ class Detector:
             )
         return costs, cost_percents
 
+    def _track_expensive_contract_call(self, event: ParsedEvent) -> None:
+        costs, cost_percents = self._extract_costs_from_fields(event.fields)
+        if not cost_percents:
+            return
+        max_dimension, max_percent = max(
+            cost_percents.items(), key=lambda item: item[1]
+        )
+        if max_percent < self.config.expensive_call_percent_threshold:
+            return
+        txid = event.fields.get("txid")
+        if isinstance(txid, str) and txid:
+            # The same tx is logged from multiple threads (mock-miner assembly,
+            # block validation, chains-coordinator replay); record it once.
+            if txid in self.expensive_contract_call_txids:
+                return
+            self.expensive_contract_call_txids.add(txid)
+            self.expensive_contract_call_txid_order.append(txid)
+            while (
+                len(self.expensive_contract_call_txid_order)
+                > self.config.hash_height_map_size
+            ):
+                oldest_txid = self.expensive_contract_call_txid_order.popleft()
+                if oldest_txid != txid:
+                    self.expensive_contract_call_txids.discard(oldest_txid)
+        self.expensive_contract_calls.append(
+            {
+                "ts": event.ts,
+                "txid": txid if isinstance(txid, str) else None,
+                "origin": event.fields.get("origin")
+                if isinstance(event.fields.get("origin"), str)
+                else None,
+                "contract_name": event.fields.get("contract_name")
+                if isinstance(event.fields.get("contract_name"), str)
+                else None,
+                "function_name": event.fields.get("function_name")
+                if isinstance(event.fields.get("function_name"), str)
+                else None,
+                "costs": costs,
+                "costs_percent": cost_percents,
+                "max_dimension": max_dimension,
+                "max_percent": max_percent,
+            }
+        )
+
+    def _expensive_contract_call_totals(self) -> List[Dict[str, object]]:
+        totals: Dict[Tuple[object, object], Dict[str, object]] = {}
+        for row in self.expensive_contract_calls:
+            key = (row.get("contract_name"), row.get("function_name"))
+            entry = totals.get(key)
+            if entry is None:
+                entry = {
+                    "contract_name": row.get("contract_name"),
+                    "function_name": row.get("function_name"),
+                    "count": 0,
+                    "max_percent": 0.0,
+                    "max_dimension": None,
+                    "last_ts": None,
+                }
+                totals[key] = entry
+            entry["count"] = int(entry["count"]) + 1
+            row_percent = row.get("max_percent")
+            if isinstance(row_percent, float) and row_percent > float(entry["max_percent"]):
+                entry["max_percent"] = row_percent
+                entry["max_dimension"] = row.get("max_dimension")
+            row_ts = row.get("ts")
+            if isinstance(row_ts, float) and (
+                entry["last_ts"] is None or row_ts > float(entry["last_ts"])
+            ):
+                entry["last_ts"] = row_ts
+        return sorted(
+            totals.values(),
+            key=lambda item: (int(item["count"]), float(item["max_percent"])),
+            reverse=True,
+        )
+
     def _track_validation_request(
         self, block_header_hash: str, event: ParsedEvent
     ) -> None:
@@ -2695,6 +2780,11 @@ class Detector:
                 else max(0.0, ts - self.last_execution_cost_ts)
             ),
             "recent_execution_costs": list(self.execution_cost_history),
+            "expensive_call_percent_threshold": (
+                self.config.expensive_call_percent_threshold
+            ),
+            "expensive_contract_calls": list(reversed(self.expensive_contract_calls)),
+            "expensive_contract_call_totals": self._expensive_contract_call_totals(),
             "signer_proposal_age_seconds": (
                 None
                 if self.last_signer_proposal_ts is None

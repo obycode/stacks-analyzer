@@ -886,6 +886,29 @@
       }).join("");
     }
 
+    function renderExpensiveCalls(items, thresholdPercent) {
+      const title = document.getElementById("expensiveCallsTitle");
+      const body = document.getElementById("expensiveCallsBody");
+      if (thresholdPercent !== null && thresholdPercent !== undefined) {
+        title.textContent = "Expensive Contract Calls (>" + thresholdPercent + "% of block budget)";
+      }
+      if (!items.length) {
+        body.innerHTML = "<tr><td colspan='5'>No expensive contract calls seen.</td></tr>";
+        return;
+      }
+      body.innerHTML = items.slice(0, 10).map((item) => {
+        const pct = Number(item.max_percent || 0);
+        const budgetLabel = pct.toFixed(1) + "% " + (item.max_dimension || "-");
+        const txLabel = escapeHtml(shortHash(item.txid || "-", 24));
+        const txLink = item.txid ? hiroTxLink(item.txid, txLabel) : "-";
+        return "<tr><td>" + escapeHtml(fmtWallClock(item.ts)) +
+          "</td><td class='mono' title='" + escapeAttr(item.contract_name || "-") + "'>" + escapeHtml(shortHash(item.contract_name || "-", 40)) +
+          "</td><td class='mono'>" + escapeHtml(item.function_name || "-") +
+          "</td><td>" + escapeHtml(budgetLabel) +
+          "</td><td class='mono'>" + txLink + "</td></tr>";
+      }).join("");
+    }
+
     function renderReportsTable() {
       const reportsBody = document.getElementById("reportsBody");
       const prevBtn = document.getElementById("reportsPrev");
@@ -1312,6 +1335,10 @@
 
       renderSortitionCards(data.recent_sortition_details || [], nowEpoch);
       renderTenureExtends(data.recent_tenure_extends || []);
+      renderExpensiveCalls(
+        data.expensive_contract_calls || [],
+        data.expensive_call_percent_threshold,
+      );
 
       const lines = data.lines || {};
       const counts = [

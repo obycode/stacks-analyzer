@@ -238,6 +238,57 @@ class TestDetector(unittest.TestCase):
             )
         )
 
+    def test_expensive_contract_calls_tracked_and_deduped(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+
+        def call_event(ts, txid, read_len):
+            return ParsedEvent(
+                source="node",
+                kind="node_contract_call_processed",
+                ts=ts,
+                fields={
+                    "txid": txid,
+                    "origin": "SP15JJ3MMWYBWQG8HJZ53DA10H5SD4R958JX9SZY8",
+                    "contract_name": "SP673Z4BPB4R73359K9HE55F2X91V5BJTN5SXZ5T.meta-peg-out-endpoint-v2-04",
+                    "function_name": "claim-peg-out",
+                    "runtime": 236933,
+                    "write_len": 482,
+                    "write_cnt": 1,
+                    "read_len": read_len,
+                    "read_cnt": 73,
+                },
+            )
+
+        # read_len limit is 100_000_000, so 25_000_000 is 25% of the budget.
+        detector.process_event(call_event(100.0, "aa" * 32, 25_000_000))
+        # Same tx seen again from another thread must not double-count.
+        detector.process_event(call_event(101.0, "aa" * 32, 25_000_000))
+        # Cheap call stays below the 20% threshold on every dimension.
+        detector.process_event(call_event(102.0, "bb" * 32, 129_403))
+        # A second expensive tx for the same function.
+        detector.process_event(call_event(103.0, "cc" * 32, 30_000_000))
+
+        snapshot = detector.snapshot(now=104.0)
+        calls = snapshot["expensive_contract_calls"]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["txid"], "cc" * 32)
+        self.assertEqual(calls[1]["txid"], "aa" * 32)
+        self.assertEqual(calls[0]["max_dimension"], "read_len")
+        self.assertAlmostEqual(calls[0]["max_percent"], 30.0)
+        self.assertEqual(snapshot["expensive_call_percent_threshold"], 20.0)
+
+        totals = snapshot["expensive_contract_call_totals"]
+        self.assertEqual(len(totals), 1)
+        self.assertEqual(totals[0]["function_name"], "claim-peg-out")
+        self.assertEqual(totals[0]["count"], 2)
+        self.assertAlmostEqual(totals[0]["max_percent"], 30.0)
+        self.assertEqual(totals[0]["last_ts"], 103.0)
+
     def test_snapshot_includes_latest_execution_cost_percentages(self) -> None:
         detector = Detector(
             DetectorConfig(

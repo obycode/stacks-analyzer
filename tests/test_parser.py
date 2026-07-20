@@ -46,6 +46,41 @@ class TestLogParser(unittest.TestCase):
         )
         self.assertEqual(event.fields["consensus_hash"], "feedbeef")
 
+    def test_parse_contract_call_processed(self) -> None:
+        parser = LogParser()
+        line = (
+            "Feb 07 13:20:24 host stacks-node[1]: INFO [1770488424.903719] "
+            "[stackslib/src/chainstate/stacks/db/transactions.rs:1124] "
+            "[chains-coordinator:20443] Contract-call successfully processed, "
+            "txid: 8e3846ce8fb52b5934eca42c73171f02ca446b9d2df1d70c7ee3f59258afcbc0, "
+            "origin: SP15JJ3MMWYBWQG8HJZ53DA10H5SD4R958JX9SZY8, origin_nonce: 15696, "
+            "contract_name: SP673Z4BPB4R73359K9HE55F2X91V5BJTN5SXZ5T.meta-peg-out-endpoint-v2-04, "
+            "function_name: claim-peg-out, function_args: [u3765, 0x5120], "
+            "return_value: (ok true), cost: ExecutionCost { write_length: 482, "
+            "write_count: 1, read_length: 129403, read_count: 73, runtime: 236933 }"
+        )
+
+        events = parser.parse_line("node", line)
+        matched = [
+            event for event in events if event.kind == "node_contract_call_processed"
+        ]
+        self.assertEqual(len(matched), 1)
+        event = matched[0]
+        self.assertEqual(
+            event.fields["txid"],
+            "8e3846ce8fb52b5934eca42c73171f02ca446b9d2df1d70c7ee3f59258afcbc0",
+        )
+        self.assertEqual(
+            event.fields["contract_name"],
+            "SP673Z4BPB4R73359K9HE55F2X91V5BJTN5SXZ5T.meta-peg-out-endpoint-v2-04",
+        )
+        self.assertEqual(event.fields["function_name"], "claim-peg-out")
+        self.assertEqual(event.fields["runtime"], 236933)
+        self.assertEqual(event.fields["write_len"], 482)
+        self.assertEqual(event.fields["write_cnt"], 1)
+        self.assertEqual(event.fields["read_len"], 129403)
+        self.assertEqual(event.fields["read_cnt"], 73)
+
     def test_parse_node_tip_without_exclamation(self) -> None:
         parser = LogParser()
         line = (

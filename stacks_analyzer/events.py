@@ -47,6 +47,11 @@ MEMPOOL_ITERATION_RE = re.compile(
 )
 EXECUTION_CONSUMED_RE = re.compile(r'execution_consumed:\s*(\{[^}]+\})')
 EXECUTION_COST_RE = re.compile(r'execution_cost:\s*(\{[^}]+\})')
+CONTRACT_CALL_COST_RE = re.compile(
+    r"cost:\s*ExecutionCost\s*\{\s*write_length:\s*(?P<write_len>\d+),\s*"
+    r"write_count:\s*(?P<write_cnt>\d+),\s*read_length:\s*(?P<read_len>\d+),\s*"
+    r"read_count:\s*(?P<read_cnt>\d+),\s*runtime:\s*(?P<runtime>\d+)\s*\}"
+)
 INCLUDE_TX_PAYLOAD_RE = re.compile(r"payload:\s*(?P<payload>[^,]+)")
 NODE_REJECTED_BLOCK_PROPOSAL_RE = re.compile(
     r"Rejected block proposal.*?reason:\s*(?P<reason>[^,]+)"
@@ -300,6 +305,29 @@ class LogParser:
                         line=line,
                     )
                 )
+
+            if "Contract-call successfully processed" in line:
+                cost_match = CONTRACT_CALL_COST_RE.search(line)
+                if cost_match:
+                    events.append(
+                        ParsedEvent(
+                            source=source,
+                            kind="node_contract_call_processed",
+                            ts=ts,
+                            fields={
+                                "txid": extract_field(line, "txid"),
+                                "origin": extract_field(line, "origin"),
+                                "contract_name": extract_field(line, "contract_name"),
+                                "function_name": extract_field(line, "function_name"),
+                                "runtime": int(cost_match.group("runtime")),
+                                "write_len": int(cost_match.group("write_len")),
+                                "write_cnt": int(cost_match.group("write_cnt")),
+                                "read_len": int(cost_match.group("read_len")),
+                                "read_cnt": int(cost_match.group("read_cnt")),
+                            },
+                            line=line,
+                        )
+                    )
 
             if "Include tx" in line and "payload:" in line:
                 payload_match = INCLUDE_TX_PAYLOAD_RE.search(line)
