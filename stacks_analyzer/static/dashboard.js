@@ -908,7 +908,11 @@
           const reportId = item.report_id;
           const reportLink = reportId ? linkTo("/report?id=" + encodeURIComponent(reportId), "view", false) : "-";
           const alertTitle = humanReadableReportAlertTitle(item);
-          return "<tr><td>" + escapeHtml(new Date(item.ts * 1000).toLocaleTimeString()) + "</td><td><span class='" + sevClass + "'>" + escapeHtml(sev) + "</span></td><td title='" + escapeAttr(alertTitle) + "'>" + escapeHtml(alertTitle) + "</td><td>" + reportLink + "</td></tr>";
+          const itemDate = new Date(item.ts * 1000);
+          const today = new Date();
+          const isToday = itemDate.toDateString() === today.toDateString();
+          const timeLabel = isToday ? itemDate.toLocaleTimeString() : itemDate.toLocaleDateString();
+          return "<tr><td>" + escapeHtml(timeLabel) + "</td><td><span class='" + sevClass + "'>" + escapeHtml(sev) + "</span></td><td title='" + escapeAttr(alertTitle) + "'>" + escapeHtml(alertTitle) + "</td><td>" + reportLink + "</td></tr>";
         }).join("");
       }
 
