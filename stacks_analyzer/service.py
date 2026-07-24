@@ -1520,10 +1520,11 @@ class MonitoringService:
             description = (
                 "The miner gathered enough signer rejections to abandon a proposal and retry."
             )
-        elif key_text.startswith("signer-validation-slow-"):
+        elif key_text.startswith("signer-validation-slow"):
             title = "Slow signer validation"
             description = (
-                "Signer-side proposal validation took longer than expected, which can delay block finalization."
+                "Multiple recent signer-side proposal validations took longer than expected, "
+                "which can delay block finalization."
             )
         elif key_text.startswith("large-signer-participation-"):
             title = "Signer participation drop detected"

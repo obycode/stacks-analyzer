@@ -20,7 +20,6 @@ EXECUTION_COST_LIMITS = {
     "read_cnt": 15_000,
 }
 MEMPOOL_EMPTY_ALERT_SECONDS = 90
-SLOW_SIGNER_VALIDATION_MS = 5_000
 TX_TYPE_KEYS = (
     "transfer",
     "contract_call",
@@ -53,6 +52,9 @@ class DetectorConfig:
     burn_block_boundary_window_seconds: int = 15
     expensive_call_percent_threshold: float = 20.0
     expensive_call_history_size: int = 200
+    slow_signer_validation_ms: int = 10_000
+    slow_validation_window: int = 10
+    slow_validation_min_count: int = 3
 
 
 @dataclass
@@ -179,6 +181,9 @@ class Detector:
         )
         self.expensive_contract_call_txids: Set[str] = set()
         self.expensive_contract_call_txid_order: Deque[str] = deque()
+        self.signer_validation_samples: Deque[Dict[str, object]] = deque(
+            maxlen=self.config.slow_validation_window
+        )
         self.signer_names: Dict[str, str] = signer_names or {}
 
         self.processed_lines: Dict[str, int] = defaultdict(int)
@@ -766,19 +771,44 @@ class Detector:
             validation_time_ms = event.fields.get("validation_time_ms")
             if isinstance(validation_time_ms, int):
                 self.last_signer_validation_ms = validation_time_ms
-                if validation_time_ms > SLOW_SIGNER_VALIDATION_MS:
-                    signature_hash = event.fields.get("signer_signature_hash")
-                    if isinstance(signature_hash, str) and signature_hash:
-                        key = "signer-validation-slow-%s" % signature_hash
-                    else:
-                        key = "signer-validation-slow"
+                block_size = event.fields.get("size")
+                threshold_ms = self.config.slow_signer_validation_ms
+                self.signer_validation_samples.append(
+                    {
+                        "ts": event.ts,
+                        "validation_time_ms": validation_time_ms,
+                        "size": block_size if isinstance(block_size, int) else None,
+                    }
+                )
+                slow_count = sum(
+                    1
+                    for sample in self.signer_validation_samples
+                    if isinstance(sample.get("validation_time_ms"), int)
+                    and sample["validation_time_ms"] > threshold_ms
+                )
+                if (
+                    validation_time_ms > threshold_ms
+                    and slow_count >= self.config.slow_validation_min_count
+                ):
+                    size_text = (
+                        ", block_size=%d bytes" % block_size
+                        if isinstance(block_size, int)
+                        else ""
+                    )
                     self._emit_alert(
                         alerts=alerts,
-                        key=key,
+                        key="signer-validation-slow",
                         severity="warning",
                         message=(
-                            "Signer validation was slow: %dms (threshold=%dms)"
-                            % (validation_time_ms, SLOW_SIGNER_VALIDATION_MS)
+                            "Signer validation slow: %d of last %d over %dms "
+                            "(latest=%dms%s)"
+                            % (
+                                slow_count,
+                                len(self.signer_validation_samples),
+                                threshold_ms,
+                                validation_time_ms,
+                                size_text,
+                            )
                         ),
                         ts=event.ts,
                     )

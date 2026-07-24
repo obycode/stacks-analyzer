@@ -886,6 +886,17 @@
       }).join("");
     }
 
+    function shortContractId(value) {
+      if (!value) return "-";
+      const text = String(value);
+      const dot = text.indexOf(".");
+      if (dot <= 0) return shortHash(text, 20);
+      const principal = text.slice(0, dot);
+      const contractName = text.slice(dot + 1);
+      if (principal.length <= 12) return text;
+      return principal.slice(0, 5) + ".." + principal.slice(-4) + "." + contractName;
+    }
+
     function renderExpensiveCalls(items, thresholdPercent) {
       const title = document.getElementById("expensiveCallsTitle");
       const body = document.getElementById("expensiveCallsBody");
@@ -902,7 +913,7 @@
         const txLabel = escapeHtml(shortHash(item.txid || "-", 24));
         const txLink = item.txid ? hiroTxLink(item.txid, txLabel) : "-";
         return "<tr><td>" + escapeHtml(fmtWallClock(item.ts)) +
-          "</td><td class='mono' title='" + escapeAttr(item.contract_name || "-") + "'>" + escapeHtml(shortHash(item.contract_name || "-", 40)) +
+          "</td><td class='mono' title='" + escapeAttr(item.contract_name || "-") + "'>" + escapeHtml(shortContractId(item.contract_name)) +
           "</td><td class='mono'>" + escapeHtml(item.function_name || "-") +
           "</td><td>" + escapeHtml(budgetLabel) +
           "</td><td class='mono'>" + txLink + "</td></tr>";
@@ -1006,7 +1017,7 @@
       if (key.startsWith("sortition-winner-rejected-")) return "Sortition winner rejected";
       if (key.startsWith("node-block-proposal-rejected-")) return "Node rejected block proposal";
       if (key.startsWith("miner-signers-rejected-")) return "Miner proposal rejected by signers";
-      if (key.startsWith("signer-validation-slow-")) return "Slow signer validation";
+      if (key.startsWith("signer-validation-slow")) return "Slow signer validation";
       if (key.startsWith("large-signer-participation-")) return "Signer participation drop detected";
       if (key.startsWith("sortition-parent-burn-mismatch-")) return "Sortition parent-burn mismatch";
       if (key.startsWith("mempool-iteration-deadline")) return "Miner mempool iteration hit deadline";

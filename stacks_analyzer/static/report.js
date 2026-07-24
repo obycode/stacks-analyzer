@@ -60,10 +60,10 @@
         title = "Miner proposal rejected by signers";
         description =
           "The miner reached signer rejection threshold for a proposal and retried after a pause.";
-      } else if (key.startsWith("signer-validation-slow-")) {
+      } else if (key.startsWith("signer-validation-slow")) {
         title = "Slow signer validation";
         description =
-          "Signer-side proposal validation took longer than expected and may delay threshold progress.";
+          "Multiple recent signer-side proposal validations took longer than expected and may delay threshold progress.";
       } else if (key.startsWith("mempool-iteration-deadline")) {
         title = "Miner mempool iteration hit deadline";
         description =

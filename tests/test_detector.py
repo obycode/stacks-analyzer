@@ -630,28 +630,68 @@ class TestDetector(unittest.TestCase):
         self.assertEqual(alerts[0].severity, "warning")
         self.assertIn("retry_pause_ms=500", alerts[0].message)
 
-    def test_signer_validation_slow_emits_warning_alert(self) -> None:
+    def test_signer_validation_slow_requires_sustained_slowness(self) -> None:
         detector = Detector(
             DetectorConfig(
                 alert_cooldown_seconds=0,
                 report_interval_seconds=99999,
             )
         )
-        alerts = detector.process_event(
-            ParsedEvent(
+
+        def validate_event(ts, signature_hash, ms):
+            return ParsedEvent(
                 source="signer",
                 kind="signer_block_validate_ok",
-                ts=100.0,
+                ts=ts,
                 fields={
-                    "signer_signature_hash": "f98fab91d65e",
-                    "validation_time_ms": 5400,
+                    "signer_signature_hash": signature_hash,
+                    "validation_time_ms": ms,
+                    "size": 123456,
                 },
             )
-        )
+
+        # First two slow validations stay below the 3-of-10 trigger.
+        alerts = detector.process_event(validate_event(100.0, "aa11", 12_000))
+        self.assertEqual(alerts, [])
+        alerts = detector.process_event(validate_event(110.0, "bb22", 15_000))
+        self.assertEqual(alerts, [])
+        # Fast samples in between never fire.
+        alerts = detector.process_event(validate_event(120.0, "cc33", 50))
+        self.assertEqual(alerts, [])
+        # Third slow validation in the window fires a single shared-key alert.
+        alerts = detector.process_event(validate_event(130.0, "dd44", 11_000))
         self.assertEqual(len(alerts), 1)
-        self.assertEqual(alerts[0].key, "signer-validation-slow-f98fab91d65e")
+        self.assertEqual(alerts[0].key, "signer-validation-slow")
         self.assertEqual(alerts[0].severity, "warning")
-        self.assertIn("5400ms", alerts[0].message)
+        self.assertIn("3 of last 4", alerts[0].message)
+        self.assertIn("latest=11000ms", alerts[0].message)
+        self.assertIn("block_size=123456", alerts[0].message)
+
+    def test_signer_validation_slow_shared_key_respects_cooldown(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=300,
+                report_interval_seconds=99999,
+            )
+        )
+        alerts = []
+        for index in range(6):
+            alerts = detector.process_event(
+                ParsedEvent(
+                    source="signer",
+                    kind="signer_block_validate_ok",
+                    ts=100.0 + index * 10,
+                    fields={
+                        "signer_signature_hash": "hash%d" % index,
+                        "validation_time_ms": 12_000,
+                    },
+                )
+            )
+            if index == 2:
+                self.assertEqual(len(alerts), 1)
+            elif index > 2:
+                # Different proposals no longer defeat the cooldown.
+                self.assertEqual(alerts, [])
 
     def test_new_block_event_closes_proposal_and_updates_heights(self) -> None:
         detector = Detector(
