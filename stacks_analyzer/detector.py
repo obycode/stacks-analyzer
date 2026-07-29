@@ -242,6 +242,7 @@ class Detector:
                 consensus_hash=event.fields.get("consensus_hash")
                 if isinstance(event.fields.get("consensus_hash"), str)
                 else None,
+                alerts=alerts,
             )
             if self.last_node_tip_ts is not None:
                 interval_seconds = event.ts - self.last_node_tip_ts
@@ -321,6 +322,9 @@ class Detector:
                 costs, cost_percents = self._extract_costs_from_fields(event.fields)
                 is_validated = event.fields.get("is_validated")
                 if costs and (is_validated is True or is_validated is None):
+                    tx_type_counts, pending_tenure_changes = (
+                        self._pop_validation_payload_counts(block_header_hash)
+                    )
                     self._remember_pending_execution_cost(
                         block_header_hash=block_header_hash,
                         ts=event.ts,
@@ -339,9 +343,8 @@ class Detector:
                         consensus_hash=event.fields.get("consensus_hash")
                         if isinstance(event.fields.get("consensus_hash"), str)
                         else None,
-                        tx_type_counts=self._pop_validation_payload_counts(
-                            block_header_hash
-                        ),
+                        tx_type_counts=tx_type_counts,
+                        tenure_changes=pending_tenure_changes,
                         costs=costs,
                         cost_percents=cost_percents,
                     )
@@ -591,67 +594,11 @@ class Detector:
                 self.current_miner_winning_stacks_block_hash = winning_stacks_block_hash
             self.current_miner_last_updated_ts = event.ts
 
-        elif event.kind == "node_tenure_change":
-            tenure_change_kind = event.fields.get("tenure_change_kind")
-            txid = event.fields.get("txid")
-            origin = event.fields.get("origin")
-            block_height = event.fields.get("block_height")
-            if not isinstance(block_height, int):
-                block_height = self.current_stacks_block_height
-            burn_height = event.fields.get("burn_height")
-            if not isinstance(burn_height, int):
-                burn_height = self.current_bitcoin_block_height
-            if isinstance(tenure_change_kind, str):
-                self.tenure_change_history.append(
-                    {
-                        "ts": event.ts,
-                        "kind": tenure_change_kind,
-                        "txid": txid if isinstance(txid, str) else None,
-                        "origin": origin if isinstance(origin, str) else None,
-                        "block_height": block_height,
-                        "burn_height": burn_height,
-                    }
-                )
-            if isinstance(tenure_change_kind, str) and "extend" in tenure_change_kind.lower():
-                self.last_tenure_extend_kind = tenure_change_kind
-                self.last_tenure_extend_txid = txid if isinstance(txid, str) else None
-                self.last_tenure_extend_origin = origin if isinstance(origin, str) else None
-                self.last_tenure_extend_ts = event.ts
-                self.tenure_extend_history.append(
-                    {
-                        "ts": event.ts,
-                        "kind": tenure_change_kind,
-                        "txid": self.last_tenure_extend_txid,
-                        "origin": self.last_tenure_extend_origin,
-                        "block_height": block_height,
-                        "burn_height": burn_height,
-                    }
-                )
-                extend_key = (
-                    "tenure-extend-%s" % self.last_tenure_extend_txid
-                    if self.last_tenure_extend_txid
-                    else "tenure-extend-%s-%s-%s"
-                    % (
-                        tenure_change_kind,
-                        block_height if block_height is not None else "na",
-                        burn_height if burn_height is not None else "na",
-                    )
-                )
-                self._emit_alert(
-                    alerts=alerts,
-                    key=extend_key,
-                    severity="info",
-                    message=(
-                        "Tenure extend observed: kind=%s txid=%s block_height=%s burn_height=%s"
-                        % (
-                            tenure_change_kind,
-                            self.last_tenure_extend_txid or "n/a",
-                            block_height if block_height is not None else "n/a",
-                            burn_height if burn_height is not None else "n/a",
-                        )
-                    ),
-                    ts=event.ts,
-                )
+        # NOTE: "node_tenure_change" events are intentionally NOT recorded
+        # here. Those log lines come from the miner's block-assembly path
+        # (including mock mining), so tenure changes are instead captured
+        # from [block-proposal] validation payloads and committed in
+        # _commit_confirmed_tenure_changes once the block advances the tip.
 
         elif event.kind == "node_block_proposal_validation_request":
             self.block_proposal_validation_requests.append(event.ts)
@@ -2216,6 +2163,7 @@ class Detector:
             else None,
             "payload_counts": {key: 0 for key in TX_TYPE_KEYS},
             "seen_txids": set(),
+            "tenure_changes": [],
         }
         self.pending_validation_contexts.append(context)
 
@@ -2237,13 +2185,29 @@ class Detector:
                     return
                 seen_txids.add(txid)
             payload_counts[payload_type] = int(payload_counts.get(payload_type) or 0) + 1
+            # Record tenure-change details so they can be committed only if
+            # this proposed block is confirmed (mock-miner lines never reach
+            # here: from_block_proposal_thread is checked above)
+            if isinstance(payload, str) and payload.strip().startswith("TenureChange("):
+                kind = payload.strip()[len("TenureChange("):].rstrip(")")
+                tenure_changes = context.get("tenure_changes")
+                if isinstance(tenure_changes, list) and kind:
+                    tenure_changes.append(
+                        {
+                            "kind": kind,
+                            "txid": txid if isinstance(txid, str) else None,
+                            "origin": event.fields.get("origin")
+                            if isinstance(event.fields.get("origin"), str)
+                            else None,
+                        }
+                    )
             return
 
     def _pop_validation_payload_counts(
         self, block_header_hash: str
-    ) -> Optional[Dict[str, int]]:
+    ) -> Tuple[Optional[Dict[str, int]], List[Dict[str, object]]]:
         if not self.pending_validation_contexts:
-            return None
+            return None, []
         matched_index = None
         for idx in range(len(self.pending_validation_contexts) - 1, -1, -1):
             context = self.pending_validation_contexts[idx]
@@ -2251,18 +2215,22 @@ class Detector:
                 matched_index = idx
                 break
         if matched_index is None:
-            return None
+            return None, []
         context = self.pending_validation_contexts[matched_index]
         del self.pending_validation_contexts[matched_index]
+        raw_tenure_changes = context.get("tenure_changes")
+        tenure_changes = (
+            raw_tenure_changes if isinstance(raw_tenure_changes, list) else []
+        )
         payload_counts = context.get("payload_counts")
         if not isinstance(payload_counts, dict):
-            return None
+            return None, tenure_changes
         normalized = {key: 0 for key in TX_TYPE_KEYS}
         for key in TX_TYPE_KEYS:
             value = payload_counts.get(key)
             if isinstance(value, int) and value > 0:
                 normalized[key] = value
-        return normalized
+        return normalized, tenure_changes
 
     def _classify_payload(self, payload: object) -> str:
         if not isinstance(payload, str) or not payload:
@@ -2296,6 +2264,7 @@ class Detector:
         tx_type_counts: Optional[Dict[str, int]],
         costs: Dict[str, int],
         cost_percents: Dict[str, float],
+        tenure_changes: Optional[List[Dict[str, object]]] = None,
     ) -> None:
         self.pending_execution_cost_by_block_hash[block_header_hash] = {
             "ts": ts,
@@ -2307,6 +2276,7 @@ class Detector:
             "tx_type_counts": tx_type_counts,
             "costs": costs,
             "costs_percent": cost_percents,
+            "tenure_changes": tenure_changes if isinstance(tenure_changes, list) else [],
         }
         self.pending_execution_cost_order.append(block_header_hash)
         while (
@@ -2323,12 +2293,17 @@ class Detector:
         ts: float,
         block_header_hash: Optional[str],
         consensus_hash: Optional[str],
+        alerts: Optional[List[Alert]] = None,
     ) -> Optional[Dict[str, object]]:
         if not isinstance(block_header_hash, str) or not block_header_hash:
             return None
         pending = self.pending_execution_cost_by_block_hash.pop(block_header_hash, None)
         if not isinstance(pending, dict):
             return None
+        # Tenure changes ride along with the pending record and are only
+        # committed here, once the block actually advanced the tip - this
+        # keeps mock-mined blocks out of the extend history
+        self._commit_confirmed_tenure_changes(pending, ts, alerts)
         costs = pending.get("costs")
         cost_percents = pending.get("costs_percent")
         if not isinstance(costs, dict) or not costs:
@@ -2381,6 +2356,77 @@ class Detector:
             }
         )
         return pending
+
+    def _commit_confirmed_tenure_changes(
+        self,
+        pending: Dict[str, object],
+        ts: float,
+        alerts: Optional[List[Alert]],
+    ) -> None:
+        tenure_changes = pending.get("tenure_changes")
+        if not isinstance(tenure_changes, list) or not tenure_changes:
+            return
+        block_height = (
+            pending.get("block_height")
+            if isinstance(pending.get("block_height"), int)
+            else self.current_stacks_block_height
+        )
+        burn_height = self.current_bitcoin_block_height
+        for change in tenure_changes:
+            if not isinstance(change, dict):
+                continue
+            kind = change.get("kind")
+            if not isinstance(kind, str) or not kind:
+                continue
+            txid = change.get("txid") if isinstance(change.get("txid"), str) else None
+            origin = (
+                change.get("origin")
+                if isinstance(change.get("origin"), str)
+                else None
+            )
+            entry = {
+                "ts": ts,
+                "kind": kind,
+                "txid": txid,
+                "origin": origin,
+                "block_height": block_height,
+                "burn_height": burn_height,
+            }
+            self.tenure_change_history.append(entry)
+            if "extend" not in kind.lower():
+                continue
+            self.last_tenure_extend_kind = kind
+            self.last_tenure_extend_txid = txid
+            self.last_tenure_extend_origin = origin
+            self.last_tenure_extend_ts = ts
+            self.tenure_extend_history.append(dict(entry))
+            if alerts is None:
+                continue
+            extend_key = (
+                "tenure-extend-%s" % txid
+                if txid
+                else "tenure-extend-%s-%s-%s"
+                % (
+                    kind,
+                    block_height if block_height is not None else "na",
+                    burn_height if burn_height is not None else "na",
+                )
+            )
+            self._emit_alert(
+                alerts=alerts,
+                key=extend_key,
+                severity="info",
+                message=(
+                    "Tenure extend confirmed: kind=%s txid=%s block_height=%s burn_height=%s"
+                    % (
+                        kind,
+                        txid or "n/a",
+                        block_height if block_height is not None else "n/a",
+                        burn_height if burn_height is not None else "n/a",
+                    )
+                ),
+                ts=ts,
+            )
 
     def _apply_pending_execution_cost_if_tip_already_confirmed(
         self, block_header_hash: str

@@ -5,6 +5,75 @@ from stacks_analyzer.events import LogParser, ParsedEvent
 
 
 class TestDetector(unittest.TestCase):
+    def _drive_confirmed_tenure_change(
+        self,
+        detector,
+        kind,
+        txid,
+        origin,
+        block_hash,
+        block_height,
+        burn_height,
+        tip_ts,
+        consensus_hash="ee" * 20,
+    ):
+        """Drive a tenure change through the confirmed pipeline: proposal
+        validation request -> [block-proposal] include-tx -> validated
+        proposal -> tip advanced. Returns the alerts from the tip event."""
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_block_proposal",
+                ts=tip_ts - 0.9,
+                fields={
+                    "block_header_hash": block_hash,
+                    "is_validation_request": True,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_include_tx",
+                ts=tip_ts - 0.6,
+                fields={
+                    "txid": txid,
+                    "payload": "TenureChange(%s)" % kind,
+                    "origin": origin,
+                    "from_block_proposal_thread": True,
+                },
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_block_proposal",
+                ts=tip_ts - 0.3,
+                fields={
+                    "block_header_hash": block_hash,
+                    "block_height": block_height,
+                    "tx_count": 2,
+                    "runtime": 1000,
+                    "write_len": 10,
+                    "write_cnt": 1,
+                    "read_len": 100,
+                    "read_cnt": 1,
+                },
+            )
+        )
+        return detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_tip_advanced",
+                ts=tip_ts,
+                fields={
+                    "block_header_hash": block_hash,
+                    "consensus_hash": consensus_hash,
+                    "burn_height": burn_height,
+                },
+            )
+        )
+
     def test_stall_alerts(self) -> None:
         detector = Detector(
             DetectorConfig(
@@ -1159,17 +1228,16 @@ class TestDetector(unittest.TestCase):
                 },
             )
         )
-        detector.process_event(
-            ParsedEvent(
-                source="node",
-                kind="node_tenure_change",
-                ts=102.0,
-                fields={
-                    "tenure_change_kind": "ExtendAll",
-                    "txid": "cc" * 32,
-                    "origin": "SPVYF6M3FD0738FWDGDMJ84EFMGM38JS0N7DE42K",
-                },
-            )
+        self._drive_confirmed_tenure_change(
+            detector,
+            kind="ExtendAll",
+            txid="cc" * 32,
+            origin="SPVYF6M3FD0738FWDGDMJ84EFMGM38JS0N7DE42K",
+            block_hash="extend-hash-1",
+            block_height=6398581,
+            burn_height=934988,
+            tip_ts=102.0,
+            consensus_hash="bb" * 20,
         )
 
         snapshot = detector.snapshot(now=110.0)
@@ -1211,18 +1279,15 @@ class TestDetector(unittest.TestCase):
                 report_interval_seconds=99999,
             )
         )
-        detector.process_event(
-            ParsedEvent(
-                source="node",
-                kind="node_tenure_change",
-                ts=100.0,
-                fields={
-                    "tenure_change_kind": "BlockFound",
-                    "txid": "aa" * 32,
-                    "block_height": 123,
-                    "burn_height": 456,
-                },
-            )
+        self._drive_confirmed_tenure_change(
+            detector,
+            kind="BlockFound",
+            txid="aa" * 32,
+            origin="SPTEST",
+            block_hash="blockfound-hash",
+            block_height=123,
+            burn_height=456,
+            tip_ts=100.0,
         )
         snapshot = detector.snapshot(now=101.0)
         self.assertEqual(len(snapshot["tenure_change_history"]), 1)
@@ -1404,19 +1469,15 @@ class TestDetector(unittest.TestCase):
             )
         )
         for index in range(6):
-            detector.process_event(
-                ParsedEvent(
-                    source="node",
-                    kind="node_tenure_change",
-                    ts=100.0 + index,
-                    fields={
-                        "tenure_change_kind": "ExtendAll",
-                        "txid": f"tx{index}",
-                        "origin": "SPTEST",
-                        "block_height": 6319900 + index,
-                        "burn_height": 934980 + index,
-                    },
-                )
+            self._drive_confirmed_tenure_change(
+                detector,
+                kind="ExtendAll",
+                txid=f"tx{index}",
+                origin="SPTEST",
+                block_hash=f"hash-{index}",
+                block_height=6319900 + index,
+                burn_height=934980 + index,
+                tip_ts=100.0 + index,
             )
 
         snapshot = detector.snapshot(now=200.0)
@@ -1679,19 +1740,15 @@ class TestDetector(unittest.TestCase):
         )
         self.assertIn("sortition=not_observed", burn_message)
 
-        extend_alerts = detector.process_event(
-            ParsedEvent(
-                source="node",
-                kind="node_tenure_change",
-                ts=101.0,
-                fields={
-                    "tenure_change_kind": "ExtendAll",
-                    "txid": "tx-extend-1",
-                    "origin": "SPTEST",
-                    "block_height": 6319944,
-                    "burn_height": 934988,
-                },
-            )
+        extend_alerts = self._drive_confirmed_tenure_change(
+            detector,
+            kind="ExtendAll",
+            txid="tx-extend-1",
+            origin="SPTEST",
+            block_hash="extend-alert-hash",
+            block_height=6319944,
+            burn_height=934988,
+            tip_ts=101.0,
         )
         extend_keys = {alert.key for alert in extend_alerts}
         self.assertIn("tenure-extend-tx-extend-1", extend_keys)
