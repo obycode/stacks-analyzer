@@ -1225,9 +1225,10 @@
       const eta = (ts) => {
         if (ts === null || ts === undefined) return null;
         const delta = Number(ts) - nowEpoch;
-        return delta <= 0
-          ? "<span class='eta-now'>now</span>"
-          : "in " + fmtAge(delta);
+        if (delta > 0) return "in " + fmtAge(delta);
+        // Past-due: show how long the miner has left this extend on the table
+        return "<span class='eta-now'>now</span> <span class='eta-since'>(for " +
+          fmtAge(-delta) + ")</span>";
       };
       const full = eta(data.tenure_extend_eligible_ts);
       const readCt = eta(data.tenure_extend_read_count_eligible_ts);

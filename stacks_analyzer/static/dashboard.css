@@ -646,3 +646,4 @@
       text-transform: none;
     }
     .extend-eta .eta-now { color: var(--ok); font-weight: 700; }
+    .extend-eta .eta-since { color: var(--muted); font-weight: 500; }
