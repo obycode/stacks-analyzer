@@ -1217,6 +1217,28 @@
       }
     }
 
+    // Countdown until signers will accept the next tenure extend, from the
+    // eligibility timestamps signers include in their block-accept responses
+    function renderExtendEta(data, nowEpoch) {
+      const el = document.getElementById("extendEta");
+      if (!el) return;
+      const eta = (ts) => {
+        if (ts === null || ts === undefined) return null;
+        const delta = Number(ts) - nowEpoch;
+        return delta <= 0
+          ? "<span class='eta-now'>now</span>"
+          : "in " + fmtAge(delta);
+      };
+      const full = eta(data.tenure_extend_eligible_ts);
+      const readCt = eta(data.tenure_extend_read_count_eligible_ts);
+      const parts = [];
+      if (full !== null) parts.push("extend " + full);
+      if (readCt !== null) parts.push("read-ct " + readCt);
+      el.innerHTML = parts.length
+        ? "signers accept: " + parts.join(" &middot; ")
+        : "";
+    }
+
     function render(data) {
       const now = new Date();
       const nowEpoch = Date.now() / 1000;
@@ -1234,6 +1256,7 @@
       document.getElementById("stxHeight").textContent = "STX: " + (stx === null || stx === undefined ? "-" : stx);
 
       renderBlockStrip(data, nowEpoch);
+      renderExtendEta(data, nowEpoch);
 
       seedBlockCadenceFromState(data);
       seedMempoolFromState(data);

@@ -632,3 +632,51 @@ class TestLogParser(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSignerExtendEligibility(unittest.TestCase):
+    def test_parse_extend_eligibility_from_block_accept(self) -> None:
+        parser = LogParser()
+        line = (
+            "Jul 29 09:55:15 obynuc stacks-signer[898823]: INFO [1785333315.694259] "
+            "[stacks-signer/src/v0/signer.rs:990] [signer_runloop:30000] Cycle #140 "
+            "Dry-Run signer: Broadcasting block response to stacks node: "
+            "Accepted(BlockAccepted { signer_signature_hash: "
+            "8e97bf5d96a4476cac05fdde1c2889e3d1ea5858016a98cdb9ce231014b36b07, "
+            "signature: 00275f9e, metadata: SignerMessageMetadata { server_version: "
+            "stacks-signer 0.0.1 }, response_data: BlockResponseData { version: 5, "
+            "tenure_extend_timestamp: 1785333263, reject_reason: NotRejected, "
+            "tenure_extend_read_count_timestamp: 1785333340, failed_txid: None, "
+            "unknown_bytes: [] } })"
+        )
+        events = [
+            event
+            for event in parser.parse_line("signer", line)
+            if event.kind == "signer_extend_eligibility"
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].fields["tenure_extend_timestamp"], 1785333263)
+        self.assertEqual(
+            events[0].fields["tenure_extend_read_count_timestamp"], 1785333340
+        )
+
+    def test_parse_extend_eligibility_sentinel_is_none(self) -> None:
+        parser = LogParser()
+        line = (
+            "Jul 29 09:55:15 obynuc stacks-signer[898823]: INFO [1785333315.694259] "
+            "Broadcasting block response to stacks node: Accepted(BlockAccepted { "
+            "signer_signature_hash: abc123, response_data: BlockResponseData { "
+            "version: 5, tenure_extend_timestamp: 18446744073709551615, "
+            "reject_reason: NotRejected, tenure_extend_read_count_timestamp: "
+            "1785333340, failed_txid: None, unknown_bytes: [] } })"
+        )
+        events = [
+            event
+            for event in parser.parse_line("signer", line)
+            if event.kind == "signer_extend_eligibility"
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertIsNone(events[0].fields["tenure_extend_timestamp"])
+        self.assertEqual(
+            events[0].fields["tenure_extend_read_count_timestamp"], 1785333340
+        )

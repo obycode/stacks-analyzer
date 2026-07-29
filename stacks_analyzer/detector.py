@@ -159,6 +159,9 @@ class Detector:
         self.last_tenure_extend_txid: Optional[str] = None
         self.last_tenure_extend_origin: Optional[str] = None
         self.last_tenure_extend_ts: Optional[float] = None
+        self.tenure_extend_eligible_ts: Optional[int] = None
+        self.tenure_extend_read_count_eligible_ts: Optional[int] = None
+        self.extend_eligibility_updated_ts: Optional[float] = None
         self.last_accepted_proposal_burn_height: Optional[int] = None
         self.last_accepted_proposal_ts: Optional[float] = None
         self.last_burn_block_alert_height: Optional[int] = None
@@ -759,6 +762,17 @@ class Detector:
                         ),
                         ts=event.ts,
                     )
+
+        elif event.kind == "signer_extend_eligibility":
+            extend_ts = event.fields.get("tenure_extend_timestamp")
+            read_ts = event.fields.get("tenure_extend_read_count_timestamp")
+            self.tenure_extend_eligible_ts = (
+                extend_ts if isinstance(extend_ts, int) else None
+            )
+            self.tenure_extend_read_count_eligible_ts = (
+                read_ts if isinstance(read_ts, int) else None
+            )
+            self.extend_eligibility_updated_ts = event.ts
 
         elif event.kind == "signer_block_acceptance":
             signature_hash = event.fields.get("signer_signature_hash")
@@ -2829,6 +2843,13 @@ class Detector:
             "recent_confirmed_blocks": list(self.confirmed_block_history),
             "recent_confirmed_blocks_capacity": self.confirmed_block_history.maxlen,
             "burn_height_by_consensus_hash": dict(self.burn_height_by_consensus_hash),
+            "tenure_extend_eligible_ts": self.tenure_extend_eligible_ts,
+            "tenure_extend_read_count_eligible_ts": self.tenure_extend_read_count_eligible_ts,
+            "extend_eligibility_age_seconds": (
+                None
+                if self.extend_eligibility_updated_ts is None
+                else max(0.0, ts - self.extend_eligibility_updated_ts)
+            ),
             "node_tip_age_seconds": (
                 None if self.last_node_tip_ts is None else max(0.0, ts - self.last_node_tip_ts)
             ),

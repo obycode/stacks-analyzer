@@ -631,3 +631,18 @@
       border-right: 1px dotted var(--line);
       cursor: default;
     }
+    .panel-title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .extend-eta {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-transform: none;
+    }
+    .extend-eta .eta-now { color: var(--ok); font-weight: 700; }

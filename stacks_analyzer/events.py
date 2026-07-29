@@ -868,6 +868,38 @@ class LogParser:
                     )
                 )
 
+            if "Accepted(BlockAccepted" in line and "BlockResponseData {" in line:
+                extend_match = re.search(r"tenure_extend_timestamp:\s*(\d+)", line)
+                read_match = re.search(
+                    r"tenure_extend_read_count_timestamp:\s*(\d+)", line
+                )
+                extend_ts_value = None
+                if extend_match:
+                    candidate = int(extend_match.group(1))
+                    # u64::MAX and friends are "not applicable" sentinels
+                    if candidate <= 4102444800:
+                        extend_ts_value = candidate
+                read_ts_value = None
+                if read_match:
+                    candidate = int(read_match.group(1))
+                    if candidate <= 4102444800:
+                        read_ts_value = candidate
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_extend_eligibility",
+                        ts=ts,
+                        fields={
+                            "signer_signature_hash": extract_field(
+                                line, "signer_signature_hash"
+                            ),
+                            "tenure_extend_timestamp": extend_ts_value,
+                            "tenure_extend_read_count_timestamp": read_ts_value,
+                        },
+                        line=line,
+                    )
+                )
+
             if (
                 "Received block rejection and have reached the rejection threshold" in line
                 or "have reached the block rejection threshold" in line

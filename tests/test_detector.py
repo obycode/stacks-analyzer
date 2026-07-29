@@ -1816,3 +1816,31 @@ class TestDetector(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExtendEligibility(unittest.TestCase):
+    def test_snapshot_exposes_extend_eligibility(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_extend_eligibility",
+                ts=100.0,
+                fields={
+                    "signer_signature_hash": "aa" * 32,
+                    "tenure_extend_timestamp": 1785333263,
+                    "tenure_extend_read_count_timestamp": 1785333340,
+                },
+            )
+        )
+        snapshot = detector.snapshot(now=110.0)
+        self.assertEqual(snapshot["tenure_extend_eligible_ts"], 1785333263)
+        self.assertEqual(
+            snapshot["tenure_extend_read_count_eligible_ts"], 1785333340
+        )
+        self.assertEqual(snapshot["extend_eligibility_age_seconds"], 10.0)
