@@ -1272,6 +1272,28 @@ class TestDetector(unittest.TestCase):
         self.assertEqual(snapshot["current_miner_apparent_sender"], "bc1qmineraddress")
         self.assertEqual(snapshot["current_miner_pubkey"], "0277minerpubkey")
 
+    def test_snapshot_exposes_burn_height_by_consensus_hash(self) -> None:
+        detector = Detector(
+            DetectorConfig(
+                alert_cooldown_seconds=0,
+                report_interval_seconds=99999,
+            )
+        )
+        detector.process_event(
+            ParsedEvent(
+                source="node",
+                kind="node_consensus",
+                ts=100.0,
+                fields={
+                    "burn_height": 934988,
+                    "consensus_hash": "ab" * 20,
+                },
+            )
+        )
+        snapshot = detector.snapshot(now=101.0)
+        mapping = snapshot["burn_height_by_consensus_hash"]
+        self.assertEqual(mapping.get("ab" * 20), 934988)
+
     def test_tenure_change_history_includes_non_extend_changes(self) -> None:
         detector = Detector(
             DetectorConfig(

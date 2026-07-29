@@ -1025,6 +1025,131 @@
       return key || "-";
     }
 
+    function renderBlockStrip(data, nowEpoch) {
+      const container = document.getElementById("blockStrip");
+      if (!container) return;
+      const raw = data.recent_confirmed_blocks || [];
+
+      // The same block arrives from multiple log sources - dedupe by height,
+      // keeping the earliest timestamp (arrival time) and any consensus hash
+      const byHeight = new Map();
+      for (const entry of raw) {
+        const height = Number(entry && entry.block_height);
+        if (!Number.isFinite(height)) continue;
+        const existing = byHeight.get(height);
+        if (!existing) {
+          byHeight.set(height, {
+            height,
+            ts: Number(entry.ts),
+            consensusHash: entry.consensus_hash || null,
+          });
+          continue;
+        }
+        if (Number(entry.ts) < existing.ts) existing.ts = Number(entry.ts);
+        if (!existing.consensusHash && entry.consensus_hash) {
+          existing.consensusHash = entry.consensus_hash;
+        }
+      }
+      const blocks = Array.from(byHeight.values())
+        .sort((a, b) => a.height - b.height)
+        .slice(-14);
+      if (!blocks.length) {
+        container.innerHTML = "<span class='muted'>No confirmed blocks yet</span>";
+        return;
+      }
+
+      const extendKinds = new Map();
+      for (const ext of data.tenure_extend_history || []) {
+        const height = Number(ext && ext.block_height);
+        if (Number.isFinite(height) && ext.kind) extendKinds.set(height, String(ext.kind));
+      }
+      const burnByConsensus = data.burn_height_by_consensus_hash || {};
+      const avgInterval = Number(data.avg_block_interval_seconds) || 15;
+      const gapThreshold = Math.max(45, avgInterval * 3);
+
+      // Group consecutive blocks into tenures by consensus hash
+      const tenures = [];
+      for (const block of blocks) {
+        const key = block.consensusHash || "?";
+        const last = tenures[tenures.length - 1];
+        if (last && last.consensusHash === key) {
+          last.blocks.push(block);
+        } else {
+          tenures.push({ consensusHash: key, blocks: [block] });
+        }
+      }
+
+      const latestHeight = blocks[blocks.length - 1].height;
+      const pieces = [];
+      let prevTs = null;
+      for (const tenure of tenures) {
+        const isCurrent = tenure === tenures[tenures.length - 1];
+        const burnHeight = burnByConsensus[tenure.consensusHash];
+        const parts = [];
+        parts.push(
+          "<div class='tenure-label'><div class='tenure-btc'>₿</div><div class='tenure-burn'>" +
+            (burnHeight !== undefined && burnHeight !== null
+              ? escapeHtml(burnHeight)
+              : escapeHtml(shortHash(tenure.consensusHash, 6))) +
+            "</div></div>"
+        );
+        for (const block of tenure.blocks) {
+          if (prevTs !== null && block.ts - prevTs >= gapThreshold) {
+            parts.push(
+              "<div class='stall-gap' title='gap between confirmed blocks'>" +
+                fmtAge(block.ts - prevTs) + " gap</div>"
+            );
+          }
+          prevTs = block.ts;
+          const age = Math.max(0, nowEpoch - block.ts);
+          const isLatest = block.height === latestHeight;
+          const extendKind = extendKinds.get(block.height);
+          let chipClass = "block-chip";
+          if (extendKind === "ExtendAll") chipClass += " chip-extend-all";
+          else if (extendKind) chipClass += " chip-extend-read";
+          if (isLatest) {
+            chipClass +=
+              age < 30 ? " chip-fresh-ok" : age < 60 ? " chip-fresh-warn" : " chip-fresh-critical";
+          }
+          const ribbon = extendKind
+            ? "<div class='chip-ribbon " +
+              (extendKind === "ExtendAll" ? "ribbon-extend-all" : "ribbon-extend-read") +
+              "'>" +
+              (extendKind === "ExtendAll" ? "EXTEND" : "READ-CT") +
+              "</div>"
+            : "";
+          parts.push(
+            "<div class='" + chipClass + "'>" + ribbon +
+              "<div class='chip-height'>" + hiroBlockLink(block.height, "#" + block.height) + "</div>" +
+              "<div class='chip-age'>" + fmtAge(age) + " ago</div>" +
+            "</div>"
+          );
+        }
+        pieces.push(
+          "<div class='tenure-bracket" + (isCurrent ? " tenure-current" : "") + "'>" +
+            parts.join("") + "</div>"
+        );
+      }
+
+      // Ghost chip: the newest in-flight proposal above the confirmed tip
+      const openProposals = (data.recent_proposals || []).filter(
+        (p) => p && p.is_open === true && Number(p.block_height) > latestHeight
+      );
+      openProposals.sort((a, b) => Number(a.block_height) - Number(b.block_height));
+      const ghost = openProposals[openProposals.length - 1];
+      if (ghost) {
+        const pct = Number(ghost.max_percent_observed) || 0;
+        pieces.push(
+          "<div class='block-chip ghost-chip' title='block proposal in flight'>" +
+            "<div class='chip-height'>#" + escapeHtml(ghost.block_height) + "</div>" +
+            "<div class='chip-age'>" + pct.toFixed(0) + "% signed</div>" +
+          "</div>"
+        );
+      }
+
+      container.innerHTML = pieces.join("");
+    }
+
     function render(data) {
       const now = new Date();
       const nowEpoch = Date.now() / 1000;
@@ -1040,6 +1165,8 @@
       const stx = data.current_stacks_block_height;
       document.getElementById("btcHeight").textContent = "BTC: " + (btc === null || btc === undefined ? "-" : btc);
       document.getElementById("stxHeight").textContent = "STX: " + (stx === null || stx === undefined ? "-" : stx);
+
+      renderBlockStrip(data, nowEpoch);
 
       seedBlockCadenceFromState(data);
       seedMempoolFromState(data);

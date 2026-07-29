@@ -2828,6 +2828,7 @@ class Detector:
             "tenure_window_totals": tenure_window_totals,
             "recent_confirmed_blocks": list(self.confirmed_block_history),
             "recent_confirmed_blocks_capacity": self.confirmed_block_history.maxlen,
+            "burn_height_by_consensus_hash": dict(self.burn_height_by_consensus_hash),
             "node_tip_age_seconds": (
                 None if self.last_node_tip_ts is None else max(0.0, ts - self.last_node_tip_ts)
             ),

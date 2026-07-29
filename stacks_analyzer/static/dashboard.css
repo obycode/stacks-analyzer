@@ -529,3 +529,94 @@
         justify-content: center;
       }
     }
+
+    /* Recent Blocks strip: tenure brackets filling with block chips */
+    .block-strip {
+      display: flex;
+      align-items: stretch;
+      justify-content: flex-end;
+      gap: 12px;
+      overflow: hidden;
+      padding-top: 6px;
+    }
+    .tenure-bracket {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 2px solid rgba(249, 115, 22, 0.3);
+      border-radius: 14px;
+      padding: 8px;
+      flex-shrink: 0;
+    }
+    .tenure-current { border-color: rgba(249, 115, 22, 0.85); }
+    .tenure-label {
+      text-align: center;
+      padding-right: 8px;
+      border-right: 1px solid rgba(249, 115, 22, 0.3);
+      flex-shrink: 0;
+    }
+    .tenure-btc { color: #f97316; font-weight: 700; line-height: 1.1; }
+    .tenure-burn {
+      color: #fdba74;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.1;
+    }
+    .block-chip {
+      position: relative;
+      overflow: hidden;
+      background: rgba(148, 163, 184, 0.12);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 6px 10px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+    .block-chip .chip-height {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-weight: 700;
+      font-size: 15px;
+      line-height: 1.15;
+    }
+    .block-chip .chip-height a.link { color: inherit; text-decoration: none; }
+    .block-chip .chip-height a.link:hover { text-decoration: underline; }
+    .block-chip .chip-age { font-size: 11px; color: var(--muted); line-height: 1.2; }
+    .chip-extend-all, .chip-extend-read { padding-top: 18px; }
+    .chip-ribbon {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      font-size: 8px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      color: #0b1220;
+      padding: 2px 0;
+      line-height: 1;
+    }
+    .ribbon-extend-all { background: #fde68a; }
+    .ribbon-extend-read { background: #c4b5fd; }
+    .chip-extend-all { border-color: rgba(253, 230, 138, 0.65); background: rgba(253, 230, 138, 0.10); }
+    .chip-extend-read { border-color: rgba(196, 181, 253, 0.65); background: rgba(196, 181, 253, 0.10); }
+    .chip-fresh-ok { background: rgba(34, 197, 94, 0.25); border-color: var(--ok); }
+    .chip-fresh-warn { background: rgba(245, 158, 11, 0.25); border-color: var(--warn); }
+    .chip-fresh-critical { background: rgba(239, 68, 68, 0.25); border-color: var(--critical); }
+    .ghost-chip {
+      border-style: dashed;
+      border-color: rgba(56, 189, 248, 0.7);
+      background: rgba(56, 189, 248, 0.08);
+      align-self: center;
+      animation: ghostPulse 1.6s ease-in-out infinite;
+    }
+    @keyframes ghostPulse {
+      0%, 100% { opacity: 0.55; }
+      50% { opacity: 1; }
+    }
+    .stall-gap {
+      align-self: center;
+      flex-shrink: 0;
+      color: var(--critical);
+      font-size: 11px;
+      font-weight: 700;
+      border-left: 2px dotted var(--critical);
+      border-right: 2px dotted var(--critical);
+      padding: 10px 6px;
+    }
