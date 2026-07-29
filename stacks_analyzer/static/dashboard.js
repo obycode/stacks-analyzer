@@ -1158,6 +1158,52 @@
       }
 
       container.innerHTML = pieces.join("");
+      trimBlockStripToFit(container);
+    }
+
+    // CSS overflow would clip a bracket's burn-height label and leave
+    // half-cut chips. Instead, remove the oldest chips until everything
+    // fits, keeping each visible bracket's label and adding a "+N" cue
+    // for the clipped earlier blocks of that tenure.
+    function trimBlockStripToFit(container) {
+      let guard = 0;
+      while (container.scrollWidth > container.clientWidth + 1 && guard < 200) {
+        guard += 1;
+        const bracket = container.querySelector(".tenure-bracket");
+        if (!bracket) break;
+        const chips = bracket.querySelectorAll(".block-chip");
+        if (chips.length <= 1) {
+          // Not even room for label + one chip: drop the whole bracket
+          bracket.remove();
+          continue;
+        }
+        const chip = chips[0];
+        const prev = chip.previousElementSibling;
+        const next = chip.nextElementSibling;
+        chip.remove();
+        // Remove a stall-gap marker orphaned at the leading edge
+        if (prev && prev.classList.contains("stall-gap")) prev.remove();
+        else if (next && next.classList.contains("stall-gap")) next.remove();
+
+        let more = bracket.querySelector(".tenure-more");
+        if (!more) {
+          more = document.createElement("div");
+          more.className = "tenure-more";
+          more.dataset.count = "0";
+          const label = bracket.querySelector(".tenure-label");
+          if (label && label.nextSibling) {
+            bracket.insertBefore(more, label.nextSibling);
+          } else {
+            bracket.prepend(more);
+          }
+        }
+        const count = Number(more.dataset.count) + 1;
+        more.dataset.count = String(count);
+        more.textContent = "+" + count;
+        more.title =
+          count + " earlier block" + (count === 1 ? "" : "s") +
+          " in this tenure (off screen)";
+      }
     }
 
     function render(data) {
