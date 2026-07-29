@@ -1165,9 +1165,20 @@
     // half-cut chips. Instead, remove the oldest chips until everything
     // fits, keeping each visible bracket's label and adding a "+N" cue
     // for the clipped earlier blocks of that tenure.
+    function blockStripOverflows(container) {
+      // The strip is right-aligned (flex-end), so overflow spills LEFT,
+      // which scrollWidth does not report - compare edges instead
+      const first = container.firstElementChild;
+      if (!first) return false;
+      return (
+        first.getBoundingClientRect().left <
+        container.getBoundingClientRect().left - 1
+      );
+    }
+
     function trimBlockStripToFit(container) {
       let guard = 0;
-      while (container.scrollWidth > container.clientWidth + 1 && guard < 200) {
+      while (blockStripOverflows(container) && guard < 200) {
         guard += 1;
         const bracket = container.querySelector(".tenure-bracket");
         if (!bracket) break;
