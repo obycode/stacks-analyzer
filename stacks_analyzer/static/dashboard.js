@@ -1030,27 +1030,37 @@
       if (!container) return;
       const raw = data.recent_confirmed_blocks || [];
 
-      // The same block arrives from multiple log sources - dedupe by height,
-      // keeping the earliest timestamp (arrival time) and any consensus hash
+      // The same height appears many times across log sources (sibling
+      // blocks and re-observations can produce dozens of node_nakamoto_block
+      // entries over many minutes). The signer's new-block event fires once
+      // per accepted height, so prefer its timestamp; otherwise use the
+      // latest node observation.
       const byHeight = new Map();
       for (const entry of raw) {
         const height = Number(entry && entry.block_height);
         if (!Number.isFinite(height)) continue;
-        const existing = byHeight.get(height);
-        if (!existing) {
-          byHeight.set(height, {
-            height,
-            ts: Number(entry.ts),
-            consensusHash: entry.consensus_hash || null,
-          });
-          continue;
+        let rec = byHeight.get(height);
+        if (!rec) {
+          rec = { height, signerTs: null, lastNodeTs: null, consensusHash: null };
+          byHeight.set(height, rec);
         }
-        if (Number(entry.ts) < existing.ts) existing.ts = Number(entry.ts);
-        if (!existing.consensusHash && entry.consensus_hash) {
-          existing.consensusHash = entry.consensus_hash;
+        const ts = Number(entry.ts);
+        if (entry.source === "signer_new_block_event") {
+          if (rec.signerTs === null || ts < rec.signerTs) rec.signerTs = ts;
+        } else if (rec.lastNodeTs === null || ts > rec.lastNodeTs) {
+          rec.lastNodeTs = ts;
+        }
+        if (!rec.consensusHash && entry.consensus_hash) {
+          rec.consensusHash = entry.consensus_hash;
         }
       }
       const blocks = Array.from(byHeight.values())
+        .map((rec) => ({
+          height: rec.height,
+          ts: rec.signerTs !== null ? rec.signerTs : rec.lastNodeTs,
+          consensusHash: rec.consensusHash,
+        }))
+        .filter((b) => Number.isFinite(b.ts))
         .sort((a, b) => a.height - b.height)
         .slice(-14);
       if (!blocks.length) {
