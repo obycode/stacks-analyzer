@@ -1165,16 +1165,28 @@
       );
     }
 
-    function renderBurnRail(data) {
-      const rail = document.getElementById("burnRail");
-      if (!rail) return;
+    function burnStatHtml(label, value, note, title) {
+      return (
+        "<div class='burn-stat'" + (title ? " title='" + escapeAttr(title) + "'" : "") + ">" +
+          "<div class='label'>" + escapeHtml(label) + "</div>" +
+          "<div class='value'>" + value + "</div>" +
+          "<div class='burn-note'>" + (note || "&nbsp;") + "</div>" +
+        "</div>"
+      );
+    }
+
+    // Share of Bitcoin blocks that produced no Stacks coinbase, split by cause.
+    // These are outcome states rather than series, so each one is carried by a
+    // glyph and a labelled count as well as its colour.
+    function renderBurnOutcomes(data) {
+      const el = document.getElementById("burnOutcomes");
+      if (!el) return;
       const stats = data.burn_block_stats || {};
       const rated = Number(stats.rounds_rated) || 0;
       if (!rated) {
-        rail.innerHTML =
-          "<div class='rail-title'>No coinbase</div>" +
-          "<div class='rail-value muted'>-</div>" +
-          "<div class='rail-line'>no rated burn blocks yet</div>";
+        el.innerHTML =
+          "<div class='muted'>No burn block outcomes recorded yet - the first " +
+          "one resolves when the node logs CONSENSUS for a new Bitcoin block.</div>";
         return;
       }
       const won = Number(stats.with_coinbase) || 0;
@@ -1183,59 +1195,122 @@
       const percent = numOrNull(stats.no_coinbase_percent);
       const contested = numOrNull(stats.null_win_percent_of_contested);
       const satsPerNull = numOrNull(stats.sats_per_null_win);
+      const satsPerCoinbase = numOrNull(stats.sats_per_coinbase);
       const commitsPerNull = numOrNull(stats.commits_per_null_win);
+      const satsWasted = numOrNull(stats.sats_wasted);
       const since = Number(stats.burn_blocks_since_coinbase) || 0;
       const unresolved = Number(stats.rounds_unresolved) || 0;
 
+      const share = (count) => ((100 * count) / rated).toFixed(0) + "%";
+      const segments = [
+        { key: "won", glyph: "⛏", count: won, label: "with coinbase" },
+        { key: "null", glyph: "∅", count: nullWithCommits, label: "null-miner win" },
+        { key: "empty", glyph: "∅", count: nullNoCommits, label: "no block commits" },
+      ];
       const bar =
-        "<div class='rail-bar' title='" +
-          escapeAttr(
-            won + " with coinbase, " + nullWithCommits + " null-miner wins, " +
-            nullNoCommits + " with no block commits"
-          ) + "'>" +
-          "<span class='rail-seg rail-seg-won' style='flex:" + won + "'></span>" +
-          "<span class='rail-seg rail-seg-null' style='flex:" + nullWithCommits + "'></span>" +
-          "<span class='rail-seg rail-seg-empty' style='flex:" + nullNoCommits + "'></span>" +
+        "<div class='burn-bar'>" +
+          segments
+            .filter((seg) => seg.count > 0)
+            .map(
+              (seg) =>
+                "<span class='burn-seg burn-seg-" + seg.key + "' style='flex:" +
+                seg.count + "' title='" +
+                escapeAttr(seg.count + " " + seg.label + " (" + share(seg.count) + ")") +
+                "'></span>"
+            )
+            .join("") +
+        "</div>";
+      const legend =
+        "<div class='burn-legend'>" +
+          segments
+            .map(
+              (seg) =>
+                "<span class='burn-legend-item'>" +
+                  "<span class='burn-key burn-seg-" + seg.key + "'></span>" +
+                  "<strong>" + seg.count + "</strong> " + escapeHtml(seg.glyph) + " " +
+                  escapeHtml(seg.label) + " <span class='muted'>" + share(seg.count) +
+                  "</span>" +
+                "</span>"
+            )
+            .join("") +
         "</div>";
 
-      const lines = [
-        "<div class='rail-line'><span class='rail-key rail-seg-null'></span>" +
-          nullWithCommits + " null-miner win" + (nullWithCommits === 1 ? "" : "s") +
-          (contested !== null ? " (" + contested.toFixed(0) + "% of contested)" : "") +
-        "</div>",
-        "<div class='rail-line'><span class='rail-key rail-seg-empty'></span>" +
-          nullNoCommits + " with no commits</div>",
-      ];
-      if (satsPerNull !== null) {
-        lines.push(
-          "<div class='rail-line rail-line-metric' title='BTC burned in rounds the null miner took'>" +
-            formatSats(Math.round(satsPerNull)) + " / null win</div>"
-        );
-      } else if (commitsPerNull !== null) {
-        lines.push(
-          "<div class='rail-line rail-line-metric' title='No burn_fee on the accepted block commits for those rounds, so only the commit count is known'>" +
-            commitsPerNull.toFixed(1) + " commits / null win</div>"
-        );
-      }
-      lines.push(
-        "<div class='rail-line'>" +
-          (since === 0 ? "coinbase in latest BTC block" : since + " BTC block" + (since === 1 ? "" : "s") + " since coinbase") +
-        "</div>"
-      );
-      if (unresolved) {
-        lines.push(
-          "<div class='rail-line muted' title='Burn blocks whose sortition outcome never appeared in our logs; excluded from the rates'>" +
-            unresolved + " unresolved</div>"
-        );
-      }
+      // Sats per null win is the headline BTC figure, with commits per null win
+      // standing in on node builds that omit burn_fee.
+      const spendValue =
+        satsPerNull !== null
+          ? formatSats(Math.round(satsPerNull))
+          : commitsPerNull !== null
+          ? commitsPerNull.toFixed(1) + " commits"
+          : "-";
+      const spendNote =
+        satsPerNull !== null
+          ? (satsWasted !== null ? formatSats(satsWasted) + " burned for nothing" : "&nbsp;")
+          : commitsPerNull !== null
+          ? "no burn_fee logged for those rounds"
+          : "no null-miner wins yet";
 
-      rail.innerHTML =
-        "<div class='rail-title'>No coinbase</div>" +
-        "<div class='rail-value'>" +
-          (percent !== null ? percent.toFixed(percent < 10 ? 1 : 0) + "%" : "-") +
-        "</div>" +
-        "<div class='rail-sub'>of " + rated + " BTC block" + (rated === 1 ? "" : "s") + "</div>" +
-        bar + lines.join("");
+      const tiles =
+        "<div class='burn-grid'>" +
+          burnStatHtml(
+            "No coinbase",
+            (percent !== null ? percent.toFixed(percent < 10 ? 1 : 0) : "-") + "%",
+            "of " + rated + " rated BTC block" + (rated === 1 ? "" : "s"),
+            "Bitcoin blocks that started no Stacks tenure, over all whose outcome we saw"
+          ) +
+          burnStatHtml(
+            "Null-miner wins",
+            String(nullWithCommits),
+            contested !== null ? contested.toFixed(contested < 10 ? 1 : 0) + "% of contested rounds" : "",
+            "Rounds where miners did commit BTC but the null miner won anyway"
+          ) +
+          burnStatHtml(
+            "No block commits",
+            String(nullNoCommits),
+            "nobody spent BTC",
+            "Bitcoin blocks that drew no block commit at all"
+          ) +
+          burnStatHtml(
+            "Per null-miner win",
+            spendValue,
+            spendNote,
+            "What the null miner beat: BTC committed in rounds it took"
+          ) +
+          burnStatHtml(
+            "Per coinbase",
+            satsPerCoinbase !== null ? formatSats(Math.round(satsPerCoinbase)) : "-",
+            "committed per won sortition",
+            "Average BTC committed across rounds that produced a coinbase"
+          ) +
+          burnStatHtml(
+            "Since last coinbase",
+            String(since),
+            since === 1 ? "BTC block" : "BTC blocks",
+            "Resolved Bitcoin blocks since the most recent one that won a sortition"
+          ) +
+        "</div>";
+
+      const reasons = Object.entries(stats.null_reason_counts || {}).sort(
+        (a, b) => b[1] - a[1]
+      );
+      const reasonRows = reasons.length
+        ? "<table class='burn-reasons'><thead><tr><th>Null-miner reason</th><th>Rounds</th></tr>" +
+          "</thead><tbody>" +
+          reasons
+            .map(
+              ([reason, count]) =>
+                "<tr><td>" + escapeHtml(reason) + "</td><td>" + escapeHtml(count) + "</td></tr>"
+            )
+            .join("") +
+          "</tbody></table>"
+        : "";
+      const caveat = unresolved
+        ? "<div class='burn-note muted'>" + unresolved + " burn block" +
+          (unresolved === 1 ? "" : "s") + " unresolved (commits seen, outcome never " +
+          "logged) - excluded from the rates above.</div>"
+        : "";
+
+      el.innerHTML = tiles + bar + legend + reasonRows + caveat;
     }
 
     function renderBlockStrip(data, nowEpoch) {
@@ -1245,7 +1320,6 @@
         document.getElementById("blockStripTrack") ||
         document.getElementById("blockStrip");
       if (!container) return;
-      renderBurnRail(data);
       const raw = data.recent_confirmed_blocks || [];
 
       // The same height appears many times across log sources (sibling
@@ -1550,6 +1624,7 @@
 
       renderBlockStrip(data, nowEpoch);
       renderExtendEta(data, nowEpoch);
+      renderBurnOutcomes(data);
 
       seedBlockCadenceFromState(data);
       seedMempoolFromState(data);

@@ -536,74 +536,18 @@
       }
     }
 
-    /* Recent Blocks strip: burn-rate rail on the left, then tenure brackets
-       filling with block chips, right-aligned so the tip stays put. */
+    /* Recent Blocks strip: tenure brackets filling with block chips,
+       right-aligned so the tip stays put. */
     .block-strip {
       display: flex;
       align-items: stretch;
-      gap: 14px;
       overflow: hidden;
       padding-top: 6px;
     }
-    .strip-rail {
-      flex: 0 0 auto;
-      width: 150px;
-      align-self: flex-start;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 8px 10px;
-      background: rgba(148, 163, 184, 0.06);
-    }
-    .rail-title {
-      font-size: 10px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }
-    .rail-value {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 26px;
-      font-weight: 700;
-      line-height: 1.1;
-      color: #fdba74;
-    }
-    .rail-sub { font-size: 10px; color: var(--muted); margin-bottom: 6px; }
-    .rail-bar {
-      display: flex;
-      height: 6px;
-      border-radius: 3px;
-      overflow: hidden;
-      background: rgba(148, 163, 184, 0.18);
-      margin-bottom: 6px;
-    }
-    .rail-seg { min-width: 0; }
-    .rail-seg-won { background: #22c55e; }
-    .rail-seg-null { background: #f59e0b; }
-    .rail-seg-empty { background: #64748b; }
-    .rail-line {
-      font-size: 11px;
-      line-height: 1.5;
-      color: var(--fg);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .rail-line-metric {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      color: #fbbf24;
-    }
-    .rail-key {
-      display: inline-block;
-      width: 7px;
-      height: 7px;
-      border-radius: 2px;
-      margin-right: 5px;
-      vertical-align: baseline;
-    }
     .strip-track {
-      /* Basis 0, not auto: the track's width must come from the space the rail
-         leaves, never from its content, or the brackets push it wider than the
-         card and the newest blocks get clipped on the right. */
+      /* Basis 0, not auto: the track's width must come from the card, never from
+         its content, or the brackets push it wider than the card and the newest
+         blocks get clipped on the right instead of trimmed off the left. */
       flex: 1 1 0%;
       min-width: 0;
       display: flex;
@@ -780,3 +724,59 @@
     }
     .extend-eta .eta-now { color: var(--ok); font-weight: 700; }
     .extend-eta .eta-since { color: var(--muted); font-weight: 500; }
+
+    /* Bitcoin Block Outcomes: stat tiles over a proportion bar. The three
+       outcomes are states, not series, so each is labelled and given a glyph -
+       colour never carries the distinction on its own. */
+    .burn-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .burn-stat {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: rgba(148, 163, 184, 0.06);
+      cursor: default;
+    }
+    .burn-stat .value {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 20px;
+      line-height: 1.2;
+    }
+    .burn-note { font-size: 11px; color: var(--muted); line-height: 1.3; }
+    .burn-bar {
+      display: flex;
+      /* 2px surface gaps between segments, rounded outer ends */
+      gap: 2px;
+      height: 10px;
+      margin-bottom: 8px;
+    }
+    .burn-seg { min-width: 2px; border-radius: 2px; }
+    .burn-seg:first-child { border-radius: 4px 2px 2px 4px; }
+    .burn-seg:last-child { border-radius: 2px 4px 4px 2px; }
+    .burn-seg-won { background: var(--ok); }
+    .burn-seg-null { background: var(--warn); }
+    .burn-seg-empty { background: #64748b; }
+    .burn-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 18px;
+      font-size: 12px;
+      margin-bottom: 12px;
+    }
+    .burn-legend-item { white-space: nowrap; }
+    .burn-key {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 2px;
+      margin-right: 6px;
+    }
+    .burn-reasons { width: 100%; }
+    .burn-reasons td:last-child, .burn-reasons th:last-child {
+      text-align: right;
+      width: 90px;
+    }
