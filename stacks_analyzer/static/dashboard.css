@@ -601,7 +601,10 @@
       vertical-align: baseline;
     }
     .strip-track {
-      flex: 1 1 auto;
+      /* Basis 0, not auto: the track's width must come from the space the rail
+         leaves, never from its content, or the brackets push it wider than the
+         card and the newest blocks get clipped on the right. */
+      flex: 1 1 0%;
       min-width: 0;
       display: flex;
       align-items: stretch;

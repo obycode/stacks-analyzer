@@ -1385,13 +1385,17 @@
     // fits, keeping each visible bracket's label and adding a "+N" cue
     // for the clipped earlier blocks of that tenure.
     function blockStripOverflows(container) {
-      // The strip is right-aligned (flex-end), so overflow spills LEFT,
-      // which scrollWidth does not report - compare edges instead
+      // The track is right-aligned (flex-end), so overflow normally spills LEFT,
+      // which scrollWidth does not report - compare edges instead. The right
+      // edge is checked too: whenever the track ends up wider than the space the
+      // rail leaves it, the newest chips are the ones clipped.
       const first = container.firstElementChild;
+      const last = container.lastElementChild;
       if (!first) return false;
+      const box = container.getBoundingClientRect();
       return (
-        first.getBoundingClientRect().left <
-        container.getBoundingClientRect().left - 1
+        first.getBoundingClientRect().left < box.left - 1 ||
+        (last && last.getBoundingClientRect().right > box.right + 1)
       );
     }
 
@@ -1403,6 +1407,9 @@
         if (!bracket) break;
         const chips = bracket.querySelectorAll(".block-chip");
         if (chips.length <= 1) {
+          // Keep the newest tenure even when it cannot fit: an empty strip is
+          // worse than a clipped one.
+          if (container.querySelectorAll(".tenure-bracket").length <= 1) break;
           // Not even room for label + one chip: drop the whole bracket
           bracket.remove();
           continue;
