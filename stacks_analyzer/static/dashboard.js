@@ -1051,6 +1051,9 @@
       null_no_commits: { cls: "burn-row-empty", mark: "∅" },
       unresolved: { cls: "burn-row-unknown", mark: "?" },
       pending: { cls: "burn-row-pending", mark: "···" },
+      // No ledger row for this burn height: it sits inside a tenure's span, so
+      // it produced no coinbase - we just cannot say which cause.
+      missing: { cls: "burn-row-empty", mark: "∅" },
     };
 
     // Number(null) is 0, which would turn an absent metric into a real zero.
@@ -1060,13 +1063,22 @@
       return Number.isFinite(parsed) ? parsed : null;
     }
 
-    function burnRowTitle(height, row) {
-      if (!row) return "burn block " + height + ": outcome unknown";
+    function burnRowTitle(height, row, outcome) {
+      if (!row) {
+        // The ledger keeps a bounded window of burn heights, so rows can be
+        // absent for what the strip still shows. What the strip knows from the
+        // tenure grouping alone is stated anyway.
+        return outcome === "winner"
+          ? "burn block " + height +
+            ": coinbase - started this tenure (sortition details outside the tracked window)"
+          : "burn block " + height +
+            ": NO coinbase - cause outside the tracked window";
+      }
       const sats = Number(row.burn_fee_sats);
       const commits = Number(row.commit_count) || 0;
       const spend = Number.isFinite(sats) && sats > 0 ? ", " + formatSats(sats) : "";
       const reason = row.null_reason ? " (" + row.null_reason + ")" : "";
-      switch (row.outcome) {
+      switch (outcome) {
         case "winner":
           return (
             "burn block " + height + ": coinbase - sortition won by " +
@@ -1091,8 +1103,12 @@
     }
 
     function burnRowHtml(height, row, extendKinds, isTenureStart) {
-      const outcome = isTenureStart ? "winner" : (row && row.outcome) || "unresolved";
-      const style = BURN_OUTCOME_STYLES[outcome] || BURN_OUTCOME_STYLES.unresolved;
+      // A tenure exists only because its first burn block won a sortition, so
+      // that row is a coinbase whatever the ledger does or does not hold.
+      const outcome = isTenureStart
+        ? "winner"
+        : (row && row.outcome) || "missing";
+      const style = BURN_OUTCOME_STYLES[outcome] || BURN_OUTCOME_STYLES.missing;
       const partial = row && row.partial_window ? " burn-row-partial" : "";
       const extends_ = extendKinds || [];
       const ribbons = extends_
@@ -1105,7 +1121,7 @@
         .join("");
       return (
         "<div class='burn-row " + style.cls + partial + "' title='" +
-          escapeAttr(burnRowTitle(height, row)) + "'>" +
+          escapeAttr(burnRowTitle(height, row, outcome)) + "'>" +
           "<span class='burn-glyph'>₿</span>" +
           "<span class='burn-height'>" + hiroBtcBlockLink(height, escapeHtml(height)) + "</span>" +
           "<span class='burn-mark'>" + escapeHtml(style.mark) + "</span>" +
