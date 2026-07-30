@@ -10,13 +10,15 @@ STATIC_DIR = Path(__file__).with_name("static")
 
 
 def _load_static_html(filename: str) -> str:
+    """Read a page shell per request.
+
+    /static/*.js and *.css are read from disk on every request, so caching the
+    HTML here would serve an old page shell alongside new scripts after any
+    front-end edit - the scripts then look for elements the stale shell does not
+    have, and panels silently render empty until the service is restarted.
+    """
     path = STATIC_DIR / filename
     return path.read_text(encoding="utf-8")
-
-
-DASHBOARD_HTML = _load_static_html("dashboard.html")
-REPORT_HTML = _load_static_html("report.html")
-HISTORY_HTML = _load_static_html("history.html")
 
 
 def build_handler(
@@ -97,7 +99,10 @@ def build_handler(
                 self._send_bytes(path.read_bytes(), content_type)
                 return
             if parsed.path == "/":
-                self._send_bytes(DASHBOARD_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                self._send_bytes(
+                    _load_static_html("dashboard.html").encode("utf-8"),
+                    "text/html; charset=utf-8",
+                )
                 return
             if parsed.path == "/api/state":
                 payload = json.dumps(state_provider(), sort_keys=True).encode("utf-8")
@@ -197,7 +202,10 @@ def build_handler(
                         b"history disabled\n", "text/plain; charset=utf-8", status=404
                     )
                     return
-                self._send_bytes(REPORT_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                self._send_bytes(
+                    _load_static_html("report.html").encode("utf-8"),
+                    "text/html; charset=utf-8",
+                )
                 return
             if parsed.path == "/history":
                 if history_window_provider is None:
@@ -205,7 +213,10 @@ def build_handler(
                         b"history disabled\n", "text/plain; charset=utf-8", status=404
                     )
                     return
-                self._send_bytes(HISTORY_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                self._send_bytes(
+                    _load_static_html("history.html").encode("utf-8"),
+                    "text/html; charset=utf-8",
+                )
                 return
             if parsed.path == "/healthz":
                 self._send_bytes(b"ok\n", "text/plain; charset=utf-8")

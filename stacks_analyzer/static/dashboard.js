@@ -1201,7 +1201,11 @@
     }
 
     function renderBlockStrip(data, nowEpoch) {
-      const container = document.getElementById("blockStripTrack");
+      // Fall back to the whole strip when the page shell predates the track
+      // element, so the blocks still render instead of vanishing.
+      const container =
+        document.getElementById("blockStripTrack") ||
+        document.getElementById("blockStrip");
       if (!container) return;
       renderBurnRail(data);
       const raw = data.recent_confirmed_blocks || [];
