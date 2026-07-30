@@ -684,16 +684,17 @@
       border-color: rgba(56, 189, 248, 0.5);
     }
     .burn-row-partial { opacity: 0.55; }
-    .burn-extend {
-      font-size: 8px;
+    /* Extend count, inline so several extends on one burn block cost no height */
+    .burn-ext {
+      font-size: 9px;
       font-weight: 800;
-      letter-spacing: 0.08em;
       color: #0b1220;
-      text-align: center;
       border-radius: 4px;
-      padding: 1px 0;
-      line-height: 1.1;
+      padding: 0 3px;
+      line-height: 1.3;
     }
+    .burn-ext-all { background: #fde68a; }
+    .burn-ext-read { background: #c4b5fd; }
     .block-chip {
       position: relative;
       overflow: hidden;

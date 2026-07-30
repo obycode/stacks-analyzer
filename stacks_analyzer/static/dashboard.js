@@ -1102,7 +1102,7 @@
       }
     }
 
-    function burnRowHtml(height, row, extendKinds, isTenureStart) {
+    function burnRowHtml(height, row, extendTally, isTenureStart) {
       // A tenure exists only because its first burn block won a sortition, so
       // that row is a coinbase whatever the ledger does or does not hold.
       const outcome = isTenureStart
@@ -1110,22 +1110,30 @@
         : (row && row.outcome) || "missing";
       const style = BURN_OUTCOME_STYLES[outcome] || BURN_OUTCOME_STYLES.missing;
       const partial = row && row.partial_window ? " burn-row-partial" : "";
-      const extends_ = extendKinds || [];
-      const ribbons = extends_
-        .map(
-          (kind) =>
-            "<div class='burn-extend " +
-            (kind === "ExtendAll" ? "ribbon-extend-all" : "ribbon-extend-read") +
-            "'>" + (kind === "ExtendAll" ? "EXTEND" : "READ-CT") + "</div>"
-        )
-        .join("");
+      let badge = "";
+      let title = burnRowTitle(height, row, outcome);
+      if (extendTally && extendTally.total) {
+        const kinds = Array.from(extendTally.kinds, ([kind, count]) =>
+          count > 1 ? kind + " x" + count : kind
+        ).join(", ");
+        // Full extends and read-count-only extends are both possible on one
+        // burn block; the badge takes the colour of the stronger kind.
+        const cls = extendTally.kinds.has("ExtendAll")
+          ? "burn-ext-all"
+          : "burn-ext-read";
+        badge =
+          "<span class='burn-ext " + cls + "'>&uarr;" + extendTally.total + "</span>";
+        title += " | " + extendTally.total + " tenure extend" +
+          (extendTally.total === 1 ? "" : "s") + " (" + kinds + ")";
+      }
       return (
         "<div class='burn-row " + style.cls + partial + "' title='" +
-          escapeAttr(burnRowTitle(height, row, outcome)) + "'>" +
+          escapeAttr(title) + "'>" +
           "<span class='burn-glyph'>₿</span>" +
           "<span class='burn-height'>" + hiroBtcBlockLink(height, escapeHtml(height)) + "</span>" +
           "<span class='burn-mark'>" + escapeHtml(style.mark) + "</span>" +
-        "</div>" + ribbons
+          badge +
+        "</div>"
       );
     }
 
@@ -1289,15 +1297,20 @@
       }
 
       const extendKinds = new Map();
-      const extendKindsByBurn = new Map();
+      // Extends fire on each idle timeout, so a single burn block can collect
+      // several. They are tallied per burn height and shown as one count on the
+      // row: the label stacks Bitcoin blocks, not extends.
+      const extendsByBurn = new Map();
       for (const ext of data.tenure_extend_history || []) {
         const height = Number(ext && ext.block_height);
         if (Number.isFinite(height) && ext.kind) extendKinds.set(height, String(ext.kind));
         const burn = Number(ext && ext.burn_height);
         if (Number.isFinite(burn) && ext.kind) {
-          const kinds = extendKindsByBurn.get(burn) || [];
-          if (!kinds.includes(String(ext.kind))) kinds.push(String(ext.kind));
-          extendKindsByBurn.set(burn, kinds);
+          const tally = extendsByBurn.get(burn) || { total: 0, kinds: new Map() };
+          tally.total += 1;
+          const kind = String(ext.kind);
+          tally.kinds.set(kind, (tally.kinds.get(kind) || 0) + 1);
+          extendsByBurn.set(burn, tally);
         }
       }
       const burnLedger = new Map();
@@ -1347,7 +1360,7 @@
                   burnRowHtml(
                     height,
                     burnLedger.get(height),
-                    extendKindsByBurn.get(height),
+                    extendsByBurn.get(height),
                     offset === 0
                   )
                 )
