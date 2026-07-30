@@ -61,6 +61,16 @@ When enabled, the dashboard serves:
 - `GET /api/state`: raw JSON state
 - `GET /healthz`: health probe
 - Recent proposals table (latest 5, with copyable signature hashes and in-progress/approved/rejected status highlighting).
+- Recent Blocks strip: each tenure bracket lists every Bitcoin block it covered
+  on the left - the one whose sortition it won (⛏) plus each later one that
+  produced no coinbase (∅), tagged with the tenure extend that carried the
+  tenure through it. Hover a row for the commit count, sats burned, and reason.
+- No-coinbase rail beside the strip: share of Bitcoin blocks that produced no
+  coinbase, split into null-miner wins and blocks nobody committed to, plus the
+  BTC burned per null-miner win (`burn_block_stats` in `/api/state`). Burn
+  amounts come from `burn_fee` on accepted block commits, the same source as the
+  sortition cards; the rail falls back to commits per null win on node builds
+  that omit the field.
 - Visual sortition view for the latest 3 burn heights.
 - Each burn-height card shows all captured block commits, the committed stacks block target, and winner highlighting (or null-miner outcome).
 - Tenure extends table shows the latest 5 extend events with extend kind, Stacks block height, burn height, and txid.

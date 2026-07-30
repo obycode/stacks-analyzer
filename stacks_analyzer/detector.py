@@ -46,8 +46,15 @@ class DetectorConfig:
     closed_proposal_retention_seconds: int = 600
     sortition_history_rounds: int = 64
     sortition_max_commits_per_round: int = 64
+    # How many burn heights stay amendable in the lifetime outcome tallies.
+    burn_round_tally_memory: int = 1024
     hash_height_map_size: int = 4096
     tenure_extend_history_size: int = 64
+    # Minimum gap between clusters of reported extend timestamps for us to treat
+    # them as distinct tenure_idle_timeout settings rather than sampling jitter.
+    # The observed spread within one setting is a few seconds; the difference
+    # between the 30s and 120s settings is ~90s.
+    extend_config_gap_seconds: int = 45
     proposal_history_size: int = 400
     burn_block_boundary_window_seconds: int = 15
     expensive_call_percent_threshold: float = 20.0
@@ -108,6 +115,41 @@ class SortitionRoundState:
     rejected_txid: Optional[str] = None
     rejected_stacks_block_hash: Optional[str] = None
     rejected_ts: Optional[float] = None
+    # Set once the node logs CONSENSUS(height), which happens after the burn
+    # block is fully processed. Until then a round with no winner is simply
+    # still in flight; afterwards, no winner means no coinbase.
+    consensus_seen_ts: Optional[float] = None
+
+
+# Outcome of one Bitcoin block's sortition. A burn block produces a Stacks
+# coinbase only in the "winner" case; the three others are all "no coinbase",
+# and they mean different things: nobody spent BTC, the null miner beat the
+# real commits, or our log window never showed the outcome.
+BURN_OUTCOME_WINNER = "winner"
+BURN_OUTCOME_NULL_WITH_COMMITS = "null_with_commits"
+BURN_OUTCOME_NULL_NO_COMMITS = "null_no_commits"
+BURN_OUTCOME_UNRESOLVED = "unresolved"
+BURN_OUTCOME_PENDING = "pending"
+BURN_OUTCOMES = (
+    BURN_OUTCOME_WINNER,
+    BURN_OUTCOME_NULL_WITH_COMMITS,
+    BURN_OUTCOME_NULL_NO_COMMITS,
+    BURN_OUTCOME_UNRESOLVED,
+)
+
+
+@dataclass(frozen=True)
+class BurnRoundTally:
+    """The contribution one burn height currently makes to the lifetime stats.
+
+    Rounds mutate as commits stream in, so each height's last-applied
+    contribution is kept and reversed before a new one is applied.
+    """
+
+    outcome: str
+    commit_count: int
+    burn_fee_sats: int
+    null_reason: Optional[str]
 
 
 class Detector:
@@ -199,6 +241,19 @@ class Detector:
         )
         self.sortition_rounds: Dict[int, SortitionRoundState] = {}
         self.sortition_round_order: Deque[int] = deque()
+        # Lifetime burn-block outcome tallies. sortition_rounds is trimmed to a
+        # short window, so these are accumulated as rounds resolve rather than
+        # recomputed from the window.
+        self.burn_round_tallies: Dict[int, BurnRoundTally] = {}
+        self.burn_round_tally_order: Deque[int] = deque()
+        self.burn_outcome_counts: Dict[str, int] = defaultdict(int)
+        self.burn_outcome_fee_sats: Dict[str, int] = defaultdict(int)
+        self.burn_outcome_commit_counts: Dict[str, int] = defaultdict(int)
+        self.burn_null_reason_counts: Dict[str, int] = defaultdict(int)
+        # The first burn block we see may have had its commits logged before our
+        # log window opened, which would look identical to "nobody committed".
+        # It is tracked in the ledger but left out of the stats.
+        self.first_consensus_burn_height: Optional[int] = None
         self.block_height_by_hash: Dict[str, int] = {}
         self.block_height_hash_order: Deque[str] = deque()
         self.block_header_to_consensus: Dict[str, str] = {}
@@ -218,6 +273,13 @@ class Detector:
         self.signer_participation: Dict[str, Deque[bool]] = defaultdict(
             lambda: deque(maxlen=self.config.large_signer_window)
         )
+        # Per-signer tenure-extend eligibility, as reported by each signer in its
+        # block-accept response. Keyed by block, because the miner aggregates the
+        # responses for a single proposal; comparing timestamps across different
+        # blocks would mix different reference points.
+        self.signer_extend_reports: Dict[str, Dict[str, Dict[str, object]]] = {}
+        self.signer_extend_report_order: Deque[str] = deque(maxlen=32)
+        self.signer_extend_reports_block: Optional[str] = None
 
         self.last_alert_ts: Dict[str, float] = {}
         self.active_stalls: Set[str] = set()
@@ -429,6 +491,7 @@ class Detector:
                             winning_stacks_block_hash
                         )
                 round_state.winner_ts = event.ts
+                self._tally_burn_round(burn_height)
                 self._refresh_current_miner_from_latest_round(event.ts)
                 self._warn_on_sortition_parent_burn_mismatch(
                     round_state=round_state,
@@ -460,6 +523,7 @@ class Detector:
                 round_state.winner_txid = None
                 round_state.winner_stacks_block_hash = None
                 round_state.winner_ts = event.ts
+                self._tally_burn_round(burn_height)
                 self._refresh_current_miner_from_latest_round(event.ts)
                 rejection_reason = event.fields.get("rejection_reason")
                 reason_text = (
@@ -520,6 +584,7 @@ class Detector:
                         round_state.commits = round_state.commits[
                             -self.config.sortition_max_commits_per_round :
                         ]
+                    self._tally_burn_round(burn_height)
                 self._refresh_current_miner_from_latest_round(event.ts)
 
         elif event.kind == "node_tenure_notify":
@@ -543,6 +608,7 @@ class Detector:
                     round_state.winner_stacks_block_hash = None
                     round_state.winner_ts = event.ts
                     round_state.rejected_ts = round_state.rejected_ts or event.ts
+                    self._tally_burn_round(burn_height)
                 self._refresh_current_miner_from_latest_round(event.ts)
 
         elif event.kind == "node_consensus":
@@ -551,6 +617,16 @@ class Detector:
             if isinstance(consensus_hash, str) and consensus_hash:
                 self._set_current_consensus(consensus_hash, burn_height)
             if isinstance(burn_height, int):
+                # CONSENSUS(height) is logged after the burn block is fully
+                # processed, so any sortition winner and block commits for it
+                # have already been logged. A round still without a winner here
+                # produced no coinbase.
+                if self.first_consensus_burn_height is None:
+                    self.first_consensus_burn_height = burn_height
+                round_state = self._get_or_create_sortition_round(burn_height)
+                if round_state.consensus_seen_ts is None:
+                    round_state.consensus_seen_ts = event.ts
+                self._tally_burn_round(burn_height)
                 if (
                     self.last_burn_block_alert_height is None
                     or burn_height > self.last_burn_block_alert_height
@@ -803,9 +879,27 @@ class Detector:
                     self.total_weight_samples.append(int(total_weight))
                 if percent is not None:
                     state.max_percent = max(state.max_percent, float(percent))
-                if isinstance(signature_weight, int) and signature_weight > 0:
-                    if signer_pubkey:
-                        self.signer_weight_samples[signer_pubkey].append(signature_weight)
+                # The responding signer's weight and its pubkey only appear together
+                # on the "Received block acceptance" line ("signer_weight"). The
+                # "...but have not yet reached the acceptance threshold" variant
+                # reports "signature_weight" with no pubkey, so it cannot be
+                # attributed; accept either name but require a pubkey.
+                own_weight = event.fields.get("signer_weight")
+                if not isinstance(own_weight, int):
+                    own_weight = signature_weight
+                if signer_pubkey and isinstance(own_weight, int) and own_weight > 0:
+                    self.signer_weight_samples[signer_pubkey].append(own_weight)
+                if signer_pubkey:
+                    self._record_signer_extend_report(
+                        signature_hash=signature_hash,
+                        pubkey=signer_pubkey,
+                        weight=own_weight if isinstance(own_weight, int) else None,
+                        extend_ts=event.fields.get("tenure_extend_timestamp"),
+                        read_count_ts=event.fields.get(
+                            "tenure_extend_read_count_timestamp"
+                        ),
+                        ts=event.ts,
+                    )
                 self._record_signer_response(
                     state,
                     signature_hash,
@@ -1689,6 +1783,195 @@ class Detector:
             oldest_burn_height = self.sortition_round_order.popleft()
             self.sortition_rounds.pop(oldest_burn_height, None)
 
+    def _burn_round_outcome(self, round_state: SortitionRoundState) -> str:
+        has_commits = bool(round_state.commits)
+        if round_state.winner_txid and not round_state.null_miner_won:
+            return BURN_OUTCOME_WINNER
+        if round_state.null_miner_won:
+            return (
+                BURN_OUTCOME_NULL_WITH_COMMITS
+                if has_commits
+                else BURN_OUTCOME_NULL_NO_COMMITS
+            )
+        if round_state.consensus_seen_ts is None:
+            return BURN_OUTCOME_PENDING
+        # Burn block processed with no sortition line at all. With no commits
+        # that is the ordinary "nobody spent BTC" case; with commits it means
+        # our log window missed the outcome, which must not be counted as a
+        # null-miner win.
+        return BURN_OUTCOME_NULL_NO_COMMITS if not has_commits else BURN_OUTCOME_UNRESOLVED
+
+    def _burn_round_fee_sats(self, round_state: SortitionRoundState) -> int:
+        return sum(
+            commit.burn_fee
+            for commit in round_state.commits
+            if isinstance(commit.burn_fee, int)
+        )
+
+    def _burn_round_excluded(self, burn_height: int, outcome: str) -> bool:
+        """Whether a burn height is left out of the lifetime stats.
+
+        Only the first burn block in our log window, and only when its outcome
+        rests on an absence of evidence: its commits may have been logged before
+        the window opened, which is indistinguishable from nobody committing. A
+        winner or a null verdict for it is proof the window covered it.
+        """
+        return burn_height == self.first_consensus_burn_height and outcome in (
+            BURN_OUTCOME_NULL_NO_COMMITS,
+            BURN_OUTCOME_UNRESOLVED,
+        )
+
+    def _tally_burn_round(self, burn_height: int) -> None:
+        round_state = self.sortition_rounds.get(burn_height)
+        if round_state is None:
+            return
+        outcome = self._burn_round_outcome(round_state)
+        if outcome == BURN_OUTCOME_PENDING:
+            return
+        if self._burn_round_excluded(burn_height, outcome):
+            stale = self.burn_round_tallies.pop(burn_height, None)
+            if stale is not None:
+                self._apply_burn_round_tally(stale, -1)
+            return
+        tally = BurnRoundTally(
+            outcome=outcome,
+            commit_count=len(round_state.commits),
+            burn_fee_sats=self._burn_round_fee_sats(round_state),
+            # Only real null-miner wins carry a reason worth counting; the
+            # no-commits case gets the same boilerplate line from the node.
+            null_reason=(
+                round_state.null_miner_reason
+                if outcome == BURN_OUTCOME_NULL_WITH_COMMITS
+                and isinstance(round_state.null_miner_reason, str)
+                and round_state.null_miner_reason
+                else None
+            ),
+        )
+        previous = self.burn_round_tallies.get(burn_height)
+        if previous == tally:
+            return
+        if previous is None:
+            self.burn_round_tally_order.append(burn_height)
+        else:
+            self._apply_burn_round_tally(previous, -1)
+        self._apply_burn_round_tally(tally, 1)
+        self.burn_round_tallies[burn_height] = tally
+        self._trim_burn_round_tallies()
+
+    def _apply_burn_round_tally(self, tally: BurnRoundTally, sign: int) -> None:
+        self.burn_outcome_counts[tally.outcome] += sign
+        self.burn_outcome_fee_sats[tally.outcome] += sign * tally.burn_fee_sats
+        self.burn_outcome_commit_counts[tally.outcome] += sign * tally.commit_count
+        if tally.null_reason:
+            self.burn_null_reason_counts[tally.null_reason] += sign
+            if self.burn_null_reason_counts[tally.null_reason] <= 0:
+                self.burn_null_reason_counts.pop(tally.null_reason, None)
+
+    def _trim_burn_round_tallies(self) -> None:
+        # Only kept so a late-arriving commit can amend its own height; heights
+        # this far back can no longer change.
+        while len(self.burn_round_tally_order) > self.config.burn_round_tally_memory:
+            oldest = self.burn_round_tally_order.popleft()
+            self.burn_round_tallies.pop(oldest, None)
+
+    def _burn_blocks_since_coinbase(self) -> int:
+        """Resolved burn blocks after the most recent one that won a sortition."""
+        count = 0
+        for burn_height in reversed(self.sortition_round_order):
+            round_state = self.sortition_rounds.get(burn_height)
+            if round_state is None:
+                continue
+            outcome = self._burn_round_outcome(round_state)
+            if outcome == BURN_OUTCOME_WINNER:
+                return count
+            if outcome == BURN_OUTCOME_PENDING:
+                continue
+            count += 1
+        return count
+
+    def _burn_block_stats(self) -> Dict[str, object]:
+        counts = {outcome: self.burn_outcome_counts.get(outcome, 0) for outcome in BURN_OUTCOMES}
+        with_coinbase = counts[BURN_OUTCOME_WINNER]
+        null_with_commits = counts[BURN_OUTCOME_NULL_WITH_COMMITS]
+        null_no_commits = counts[BURN_OUTCOME_NULL_NO_COMMITS]
+        no_coinbase = null_with_commits + null_no_commits
+        # "unresolved" is excluded from the rates: it is a gap in what we saw,
+        # not an observed outcome, so folding it either way would skew them.
+        rated = with_coinbase + no_coinbase
+        with_commits = with_coinbase + null_with_commits
+        wasted_sats = self.burn_outcome_fee_sats.get(BURN_OUTCOME_NULL_WITH_COMMITS, 0)
+        winner_sats = self.burn_outcome_fee_sats.get(BURN_OUTCOME_WINNER, 0)
+        wasted_commits = self.burn_outcome_commit_counts.get(
+            BURN_OUTCOME_NULL_WITH_COMMITS, 0
+        )
+        return {
+            "rounds_rated": rated,
+            "rounds_unresolved": counts[BURN_OUTCOME_UNRESOLVED],
+            "with_coinbase": with_coinbase,
+            "no_coinbase": no_coinbase,
+            "null_with_commits": null_with_commits,
+            "null_no_commits": null_no_commits,
+            "no_coinbase_percent": (100.0 * no_coinbase / rated) if rated else None,
+            "null_win_percent_of_contested": (
+                (100.0 * null_with_commits / with_commits) if with_commits else None
+            ),
+            "sats_total": sum(self.burn_outcome_fee_sats.values()),
+            "sats_wasted": wasted_sats,
+            # None on node builds that omit burn_fee from accepted block commits,
+            # in which case the commit counts below are the only available
+            # measure of what the null miner beat.
+            "sats_per_null_win": (
+                (wasted_sats / float(null_with_commits))
+                if null_with_commits and wasted_sats
+                else None
+            ),
+            "sats_per_coinbase": (
+                (winner_sats / float(with_coinbase))
+                if with_coinbase and winner_sats
+                else None
+            ),
+            "commits_wasted": wasted_commits,
+            "commits_per_null_win": (
+                (wasted_commits / float(null_with_commits)) if null_with_commits else None
+            ),
+            "burn_blocks_since_coinbase": self._burn_blocks_since_coinbase(),
+            "null_reason_counts": dict(self.burn_null_reason_counts),
+        }
+
+    def _burn_block_ledger(self, limit: int = 32) -> List[Dict[str, object]]:
+        """Per-burn-block outcomes, oldest first, for the recent blocks strip."""
+        ledger: List[Dict[str, object]] = []
+        for burn_height in list(self.sortition_round_order)[-limit:]:
+            round_state = self.sortition_rounds.get(burn_height)
+            if round_state is None:
+                continue
+            candidate_ts = [
+                value
+                for value in (
+                    round_state.winner_ts,
+                    round_state.rejected_ts,
+                    round_state.consensus_seen_ts,
+                )
+                if isinstance(value, (int, float))
+            ]
+            candidate_ts.extend(commit.ts for commit in round_state.commits)
+            outcome = self._burn_round_outcome(round_state)
+            ledger.append(
+                {
+                    "burn_height": burn_height,
+                    "ts": max(candidate_ts) if candidate_ts else None,
+                    "outcome": outcome,
+                    "commit_count": len(round_state.commits),
+                    "burn_fee_sats": self._burn_round_fee_sats(round_state),
+                    "null_reason": round_state.null_miner_reason,
+                    "winner_apparent_sender": self._winner_apparent_sender(round_state),
+                    # Excluded from the stats, so the strip can mark it as such.
+                    "partial_window": self._burn_round_excluded(burn_height, outcome),
+                }
+            )
+        ledger.sort(key=lambda row: row["burn_height"])
+        return ledger
+
     def _latest_successful_sortition_round(self) -> Optional[SortitionRoundState]:
         for burn_height in reversed(self.sortition_round_order):
             round_state = self.sortition_rounds.get(burn_height)
@@ -1787,8 +2070,13 @@ class Detector:
                     sortition_state = "winner_selected"
                     winner_sender = self._winner_apparent_sender(round_state)
                     new_miner = winner_sender or ("txid:%s" % round_state.winner_txid[:12])
-                else:
+                elif round_state.commits:
                     sortition_state = "pending"
+                else:
+                    # Processed with no commits and no sortition line: no one
+                    # spent BTC, so there is no coinbase and no new tenure.
+                    sortition_state = "no_commits"
+                    new_miner = "unchanged"
 
         null_reason: Optional[str] = None
         if sortition_state == "null_miner":
@@ -2543,6 +2831,7 @@ class Detector:
             ) * 100.0
         total_weight_estimate = self._total_weight_estimate()
         signer_rows = self._all_signer_rows(total_weight_estimate)
+        extend_aggregate = self._extend_aggregate()
         large_pubkeys = {pubkey for pubkey, _ in self._current_large_signers()}
         large_signers = [
             row for row in signer_rows if row["pubkey"] in large_pubkeys
@@ -2655,7 +2944,9 @@ class Detector:
             recent_sortition_rounds.append(
                 {
                     "burn_height": burn_height,
+                    "outcome": self._burn_round_outcome(round_state),
                     "commit_count": len(round_state.commits),
+                    "burn_fee_sats": self._burn_round_fee_sats(round_state),
                     "winner_txid": round_state.winner_txid,
                     "winner_apparent_sender": winner_sender,
                     "winner_stacks_block_hash": round_state.winner_stacks_block_hash,
@@ -2696,6 +2987,7 @@ class Detector:
             recent_sortition_details.append(
                 {
                     "burn_height": burn_height,
+                    "outcome": self._burn_round_outcome(round_state),
                     "winner_txid": round_state.winner_txid,
                     "winner_apparent_sender": winner_sender,
                     "winner_stacks_block_hash": round_state.winner_stacks_block_hash,
@@ -2825,6 +3117,8 @@ class Detector:
             "recent_sortition_details": recent_sortition_details,
             "recent_sortition_rounds": recent_sortition_rounds,
             "sortition_rounds_tracked_count": len(self.sortition_rounds),
+            "burn_block_stats": self._burn_block_stats(),
+            "burn_block_ledger": self._burn_block_ledger(),
             "last_tenure_extend_kind": self.last_tenure_extend_kind,
             "last_tenure_extend_txid": self.last_tenure_extend_txid,
             "last_tenure_extend_origin": self.last_tenure_extend_origin,
@@ -2845,6 +3139,14 @@ class Detector:
             "burn_height_by_consensus_hash": dict(self.burn_height_by_consensus_hash),
             "tenure_extend_eligible_ts": self.tenure_extend_eligible_ts,
             "tenure_extend_read_count_eligible_ts": self.tenure_extend_read_count_eligible_ts,
+            # Local signer's view above; network-aggregate view below. These differ
+            # whenever our tenure_idle_timeout differs from the weighted majority's,
+            # and it is the aggregate that governs when the miner actually extends.
+            "extend_aggregate": extend_aggregate,
+            "tenure_extend_agg_eligible_ts": extend_aggregate["agg_extend_ts"],
+            "tenure_extend_agg_read_count_eligible_ts": extend_aggregate[
+                "agg_read_count_ts"
+            ],
             "extend_eligibility_age_seconds": (
                 None
                 if self.extend_eligibility_updated_ts is None
@@ -2924,6 +3226,179 @@ class Detector:
             return None
         return float(statistics.median(self.total_weight_samples))
 
+    def _record_signer_extend_report(
+        self,
+        *,
+        signature_hash: str,
+        pubkey: str,
+        weight: Optional[int],
+        extend_ts: Optional[int],
+        read_count_ts: Optional[int],
+        ts: float,
+    ) -> None:
+        if not isinstance(extend_ts, int):
+            # Signer predates the observability fields, or reported a sentinel.
+            return
+        block = self.signer_extend_reports.get(signature_hash)
+        if block is None:
+            block = {}
+            self.signer_extend_reports[signature_hash] = block
+            self.signer_extend_report_order.append(signature_hash)
+            # deque(maxlen) silently drops the oldest key; reap anything it evicted
+            live = set(self.signer_extend_report_order)
+            for stale in [k for k in self.signer_extend_reports if k not in live]:
+                del self.signer_extend_reports[stale]
+        block[pubkey] = {
+            "weight": weight,
+            "extend_ts": extend_ts,
+            "read_count_ts": read_count_ts,
+            "ts": ts,
+        }
+        self.signer_extend_reports_block = signature_hash
+
+    @staticmethod
+    def _weight_threshold(total_weight: int) -> int:
+        """Mirror NakamotoBlockHeader::compute_voting_weight_threshold (70%, rounded up)."""
+        scaled = total_weight * 7
+        return scaled // 10 + (0 if scaled % 10 == 0 else 1)
+
+    def _extend_aggregate(self) -> Dict[str, object]:
+        """Reconstruct the miner's view: the timestamp at which >=70% of signing
+        weight would accept a full tenure extend, plus the split between signers
+        running a short vs long tenure_idle_timeout."""
+        empty: Dict[str, object] = {
+            "block": None,
+            "reports": [],
+            "agg_extend_ts": None,
+            "agg_read_count_ts": None,
+            "reported_weight": 0,
+            "total_weight": None,
+            "threshold_weight": None,
+            "short_weight": 0,
+            "long_weight": 0,
+            "short_percent": None,
+            "long_percent": None,
+            "gap_seconds": None,
+            "shortfall_weight": None,
+        }
+        if not self.signer_extend_report_order:
+            return empty
+
+        total_weight_estimate = self._total_weight_estimate()
+        total_weight = int(total_weight_estimate) if total_weight_estimate else None
+        threshold = self._weight_threshold(total_weight) if total_weight else None
+
+        # Responses for the newest block are still streaming in, so its reported
+        # weight is usually short of the threshold and the percentile would jump
+        # around. Walk newest-first for the first block with enough weight to make
+        # the percentile meaningful, else fall back to the newest we have.
+        def reported(candidate: str) -> int:
+            return sum(
+                info["weight"]
+                for info in (self.signer_extend_reports.get(candidate) or {}).values()
+                if isinstance(info.get("weight"), int)
+            )
+
+        block_hash = None
+        for candidate in reversed(self.signer_extend_report_order):
+            if threshold and reported(candidate) >= threshold:
+                block_hash = candidate
+                break
+        if block_hash is None:
+            block_hash = self.signer_extend_reports_block
+        if not block_hash:
+            return empty
+        block = self.signer_extend_reports.get(block_hash) or {}
+        if not block:
+            return empty
+
+        reports = []
+        for pubkey, info in block.items():
+            reports.append(
+                {
+                    "pubkey": pubkey,
+                    "name": self._signer_display_name(pubkey),
+                    "label": self._signer_label(pubkey),
+                    "weight": info.get("weight"),
+                    "extend_ts": info.get("extend_ts"),
+                    "read_count_ts": info.get("read_count_ts"),
+                }
+            )
+        reports.sort(key=lambda item: item["extend_ts"])
+
+        # Weighted percentile, walking ascending exactly as the miner does.
+        agg_extend_ts = None
+        agg_read_count_ts = None
+        reported_weight = sum(
+            r["weight"] for r in reports if isinstance(r["weight"], int)
+        )
+        if threshold:
+            cumulative = 0
+            for item in reports:
+                if not isinstance(item["weight"], int):
+                    continue
+                cumulative += item["weight"]
+                if cumulative >= threshold:
+                    agg_extend_ts = item["extend_ts"]
+                    break
+            cumulative = 0
+            for item in sorted(
+                (r for r in reports if isinstance(r["read_count_ts"], int)),
+                key=lambda r: r["read_count_ts"],
+            ):
+                if not isinstance(item["weight"], int):
+                    continue
+                cumulative += item["weight"]
+                if cumulative >= threshold:
+                    agg_read_count_ts = item["read_count_ts"]
+                    break
+
+        # Signers configured with a longer tenure_idle_timeout report a timestamp
+        # offset by the config difference, producing a clear cluster gap. Split on
+        # the largest gap; if there is no meaningful gap they share one setting.
+        short_weight = 0
+        long_weight = 0
+        gap_seconds = None
+        stamps = [r["extend_ts"] for r in reports]
+        split_index = None
+        if len(stamps) > 1:
+            gaps = [
+                (stamps[i + 1] - stamps[i], i) for i in range(len(stamps) - 1)
+            ]
+            largest, index = max(gaps)
+            if largest >= self.config.extend_config_gap_seconds:
+                gap_seconds = largest
+                split_index = index + 1
+        for position, item in enumerate(reports):
+            weight = item["weight"] if isinstance(item["weight"], int) else 0
+            is_long = split_index is not None and position >= split_index
+            item["config_group"] = "long" if is_long else "short"
+            if is_long:
+                long_weight += weight
+            else:
+                short_weight += weight
+
+        pct = lambda value: (
+            (value / total_weight) * 100.0 if total_weight else None
+        )
+        return {
+            "block": block_hash,
+            "reports": reports,
+            "agg_extend_ts": agg_extend_ts,
+            "agg_read_count_ts": agg_read_count_ts,
+            "reported_weight": reported_weight,
+            "total_weight": total_weight,
+            "threshold_weight": threshold,
+            "short_weight": short_weight,
+            "long_weight": long_weight,
+            "short_percent": pct(short_weight),
+            "long_percent": pct(long_weight),
+            "gap_seconds": gap_seconds,
+            "shortfall_weight": (
+                max(0, threshold - short_weight) if threshold else None
+            ),
+        }
+
     def _signer_display_name(self, pubkey: str) -> Optional[str]:
         return self.signer_names.get(pubkey)
 
@@ -2938,11 +3413,17 @@ class Detector:
         all_signers = set(self.seen_signers) | set(self.signer_weight_samples.keys())
         for pubkey in all_signers:
             samples = self.signer_weight_samples.get(pubkey, deque())
-            estimated_weight = float(statistics.median(samples)) if samples else 0.0
-            if total_weight_estimate and total_weight_estimate > 0:
+            # None (not 0.0) when the signer never reported an attributable weight,
+            # so the UI can distinguish "unknown" from a genuine zero.
+            estimated_weight = float(statistics.median(samples)) if samples else None
+            if (
+                estimated_weight is not None
+                and total_weight_estimate
+                and total_weight_estimate > 0
+            ):
                 weight_percent = (estimated_weight / total_weight_estimate) * 100.0
             else:
-                weight_percent = 0.0
+                weight_percent = None
             history = self.signer_participation.get(pubkey, deque())
             participation_ratio = (
                 sum(1 for item in history if item) / float(len(history))
@@ -2964,7 +3445,7 @@ class Detector:
 
         rows.sort(
             key=lambda row: (
-                row["estimated_weight"],
+                row["estimated_weight"] if row["estimated_weight"] is not None else -1.0,
                 row["participation_ratio"],
                 row["pubkey"],
             ),

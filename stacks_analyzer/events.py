@@ -85,6 +85,24 @@ def extract_field(line: str, name: str) -> Optional[str]:
     return match.group(1)
 
 
+# Signers report u64::MAX (and other far-future values) to mean "no opinion yet",
+# e.g. before enough responses have been gathered. Treat those as absent.
+EXTEND_TS_SENTINEL_CUTOFF = 4102444800
+
+
+def _extend_timestamp(line: str, name: str) -> Optional[int]:
+    raw = extract_field(line, name)
+    if not raw:
+        return None
+    try:
+        candidate = int(raw)
+    except ValueError:
+        return None
+    if candidate <= 0 or candidate > EXTEND_TS_SENTINEL_CUTOFF:
+        return None
+    return candidate
+
+
 @dataclass
 class ParsedEvent:
     source: str
@@ -845,6 +863,13 @@ class LogParser:
                 signature_weight = extract_field(line, "signature_weight")
                 percent = extract_field(line, "percent_approved")
                 block_height = extract_field(line, "block_height")
+                # "Received block acceptance" (signer.rs) carries the responding
+                # signer's pubkey; "signer_weight" and the two extend timestamps are
+                # only present on signers built with the observability fields. The
+                # older "...but have not yet reached the acceptance threshold" variant
+                # matches this same prefix but carries signature_weight without a
+                # pubkey, so every field here is independently optional.
+                signer_weight = extract_field(line, "signer_weight")
                 events.append(
                     ParsedEvent(
                         source=source,
@@ -860,6 +885,15 @@ class LogParser:
                             "signature_weight": int(signature_weight)
                             if signature_weight
                             else None,
+                            "signer_weight": int(signer_weight)
+                            if signer_weight
+                            else None,
+                            "tenure_extend_timestamp": _extend_timestamp(
+                                line, "tenure_extend_timestamp"
+                            ),
+                            "tenure_extend_read_count_timestamp": _extend_timestamp(
+                                line, "tenure_extend_read_count_timestamp"
+                            ),
                             "percent_approved": float(percent) if percent else None,
                             "block_height": int(block_height) if block_height else None,
                             "consensus_hash": extract_field(line, "consensus_hash"),
@@ -869,21 +903,10 @@ class LogParser:
                 )
 
             if "Accepted(BlockAccepted" in line and "BlockResponseData {" in line:
-                extend_match = re.search(r"tenure_extend_timestamp:\s*(\d+)", line)
-                read_match = re.search(
-                    r"tenure_extend_read_count_timestamp:\s*(\d+)", line
+                extend_ts_value = _extend_timestamp(line, "tenure_extend_timestamp")
+                read_ts_value = _extend_timestamp(
+                    line, "tenure_extend_read_count_timestamp"
                 )
-                extend_ts_value = None
-                if extend_match:
-                    candidate = int(extend_match.group(1))
-                    # u64::MAX and friends are "not applicable" sentinels
-                    if candidate <= 4102444800:
-                        extend_ts_value = candidate
-                read_ts_value = None
-                if read_match:
-                    candidate = int(read_match.group(1))
-                    if candidate <= 4102444800:
-                        read_ts_value = candidate
                 events.append(
                     ParsedEvent(
                         source=source,

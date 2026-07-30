@@ -1760,7 +1760,9 @@ class TestDetector(unittest.TestCase):
         burn_message = next(
             alert.message for alert in burn_alerts if alert.key == "burn-block-934988"
         )
-        self.assertIn("sortition=not_observed", burn_message)
+        # Burn block processed with no commits and no sortition line: no one
+        # spent BTC on it, so it produced no coinbase.
+        self.assertIn("sortition=no_commits", burn_message)
 
         extend_alerts = self._drive_confirmed_tenure_change(
             detector,

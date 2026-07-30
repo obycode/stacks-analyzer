@@ -807,8 +807,25 @@
         const winnerKey = winnerCommit ? minerKey(winnerCommit) : "";
         const winnerTag = winnerKey ? minerName(winnerKey) : "winner-selected";
         const winnerColor = winnerKey ? minerColor(winnerKey) : null;
-        const outcome = round.null_miner_won ? "null-miner" : (round.winner_txid ? winnerTag : "pending");
-        const badgeClass = round.null_miner_won ? "badge badge-null" : "badge badge-winner";
+        // Rounds now include burn blocks that no one committed to, which are
+        // neither a null-miner win nor still pending.
+        const outcomeKey = round.outcome || (round.null_miner_won ? "null_with_commits" : "pending");
+        const outcome =
+          outcomeKey === "winner" || (!round.outcome && round.winner_txid)
+            ? winnerTag
+            : outcomeKey === "null_with_commits"
+            ? "null-miner"
+            : outcomeKey === "null_no_commits"
+            ? "no commits"
+            : outcomeKey === "unresolved"
+            ? "not logged"
+            : "pending";
+        const badgeClass =
+          outcomeKey === "null_with_commits"
+            ? "badge badge-null"
+            : outcomeKey === "null_no_commits" || outcomeKey === "unresolved"
+            ? "badge badge-empty"
+            : "badge badge-winner";
         const sortedCommits = commits.slice().sort((a, b) => {
           const keyA = minerKey(a);
           const keyB = minerKey(b);
@@ -1025,9 +1042,168 @@
       return key || "-";
     }
 
+    // One row per Bitcoin block in a tenure's label. Only the burn block that
+    // won the sortition produced a coinbase; the rest arrived while this tenure
+    // stayed active, which is what an extend is for.
+    const BURN_OUTCOME_STYLES = {
+      winner: { cls: "burn-row-won", mark: "⛏" },
+      null_with_commits: { cls: "burn-row-null", mark: "∅" },
+      null_no_commits: { cls: "burn-row-empty", mark: "∅" },
+      unresolved: { cls: "burn-row-unknown", mark: "?" },
+      pending: { cls: "burn-row-pending", mark: "···" },
+    };
+
+    // Number(null) is 0, which would turn an absent metric into a real zero.
+    function numOrNull(value) {
+      if (value === null || value === undefined || value === "") return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function burnRowTitle(height, row) {
+      if (!row) return "burn block " + height + ": outcome unknown";
+      const sats = Number(row.burn_fee_sats);
+      const commits = Number(row.commit_count) || 0;
+      const spend = Number.isFinite(sats) && sats > 0 ? ", " + formatSats(sats) : "";
+      const reason = row.null_reason ? " (" + row.null_reason + ")" : "";
+      switch (row.outcome) {
+        case "winner":
+          return (
+            "burn block " + height + ": coinbase - sortition won by " +
+            (row.winner_apparent_sender || "unknown miner") +
+            ", " + commits + " commit" + (commits === 1 ? "" : "s") + spend
+          );
+        case "null_with_commits":
+          return (
+            "burn block " + height + ": NO coinbase - null miner beat " + commits +
+            " commit" + (commits === 1 ? "" : "s") + spend + reason
+          );
+        case "null_no_commits":
+          return "burn block " + height + ": NO coinbase - no block commits, nobody spent BTC";
+        case "unresolved":
+          return (
+            "burn block " + height + ": outcome never logged, " + commits +
+            " commit" + (commits === 1 ? "" : "s") + " seen"
+          );
+        default:
+          return "burn block " + height + ": sortition still in flight";
+      }
+    }
+
+    function burnRowHtml(height, row, extendKinds, isTenureStart) {
+      const outcome = isTenureStart ? "winner" : (row && row.outcome) || "unresolved";
+      const style = BURN_OUTCOME_STYLES[outcome] || BURN_OUTCOME_STYLES.unresolved;
+      const partial = row && row.partial_window ? " burn-row-partial" : "";
+      const extends_ = extendKinds || [];
+      const ribbons = extends_
+        .map(
+          (kind) =>
+            "<div class='burn-extend " +
+            (kind === "ExtendAll" ? "ribbon-extend-all" : "ribbon-extend-read") +
+            "'>" + (kind === "ExtendAll" ? "EXTEND" : "READ-CT") + "</div>"
+        )
+        .join("");
+      return (
+        "<div class='burn-row " + style.cls + partial + "' title='" +
+          escapeAttr(burnRowTitle(height, row)) + "'>" +
+          "<span class='burn-glyph'>₿</span>" +
+          "<span class='burn-height'>" + hiroBtcBlockLink(height, escapeHtml(height)) + "</span>" +
+          "<span class='burn-mark'>" + escapeHtml(style.mark) + "</span>" +
+        "</div>" + ribbons
+      );
+    }
+
+    // Burn blocks covered by a tenure: the one it won, then every later one up
+    // to (but not including) the burn block that started the next tenure.
+    function tenureBurnHeights(burnHeight, nextBurnHeight, latestBurnHeight) {
+      if (!Number.isFinite(burnHeight)) return [];
+      const end = Number.isFinite(nextBurnHeight)
+        ? nextBurnHeight - 1
+        : Math.max(burnHeight, Number.isFinite(latestBurnHeight) ? latestBurnHeight : burnHeight);
+      const heights = [];
+      // Capped so a burnchain reorg or a stale mapping cannot produce a
+      // runaway column of rows.
+      for (let h = burnHeight; h <= end && heights.length < 9; h += 1) heights.push(h);
+      return heights;
+    }
+
+    function renderBurnRail(data) {
+      const rail = document.getElementById("burnRail");
+      if (!rail) return;
+      const stats = data.burn_block_stats || {};
+      const rated = Number(stats.rounds_rated) || 0;
+      if (!rated) {
+        rail.innerHTML =
+          "<div class='rail-title'>No coinbase</div>" +
+          "<div class='rail-value muted'>-</div>" +
+          "<div class='rail-line'>no rated burn blocks yet</div>";
+        return;
+      }
+      const won = Number(stats.with_coinbase) || 0;
+      const nullWithCommits = Number(stats.null_with_commits) || 0;
+      const nullNoCommits = Number(stats.null_no_commits) || 0;
+      const percent = numOrNull(stats.no_coinbase_percent);
+      const contested = numOrNull(stats.null_win_percent_of_contested);
+      const satsPerNull = numOrNull(stats.sats_per_null_win);
+      const commitsPerNull = numOrNull(stats.commits_per_null_win);
+      const since = Number(stats.burn_blocks_since_coinbase) || 0;
+      const unresolved = Number(stats.rounds_unresolved) || 0;
+
+      const bar =
+        "<div class='rail-bar' title='" +
+          escapeAttr(
+            won + " with coinbase, " + nullWithCommits + " null-miner wins, " +
+            nullNoCommits + " with no block commits"
+          ) + "'>" +
+          "<span class='rail-seg rail-seg-won' style='flex:" + won + "'></span>" +
+          "<span class='rail-seg rail-seg-null' style='flex:" + nullWithCommits + "'></span>" +
+          "<span class='rail-seg rail-seg-empty' style='flex:" + nullNoCommits + "'></span>" +
+        "</div>";
+
+      const lines = [
+        "<div class='rail-line'><span class='rail-key rail-seg-null'></span>" +
+          nullWithCommits + " null-miner win" + (nullWithCommits === 1 ? "" : "s") +
+          (contested !== null ? " (" + contested.toFixed(0) + "% of contested)" : "") +
+        "</div>",
+        "<div class='rail-line'><span class='rail-key rail-seg-empty'></span>" +
+          nullNoCommits + " with no commits</div>",
+      ];
+      if (satsPerNull !== null) {
+        lines.push(
+          "<div class='rail-line rail-line-metric' title='BTC burned in rounds the null miner took'>" +
+            formatSats(Math.round(satsPerNull)) + " / null win</div>"
+        );
+      } else if (commitsPerNull !== null) {
+        lines.push(
+          "<div class='rail-line rail-line-metric' title='No burn_fee on the accepted block commits for those rounds, so only the commit count is known'>" +
+            commitsPerNull.toFixed(1) + " commits / null win</div>"
+        );
+      }
+      lines.push(
+        "<div class='rail-line'>" +
+          (since === 0 ? "coinbase in latest BTC block" : since + " BTC block" + (since === 1 ? "" : "s") + " since coinbase") +
+        "</div>"
+      );
+      if (unresolved) {
+        lines.push(
+          "<div class='rail-line muted' title='Burn blocks whose sortition outcome never appeared in our logs; excluded from the rates'>" +
+            unresolved + " unresolved</div>"
+        );
+      }
+
+      rail.innerHTML =
+        "<div class='rail-title'>No coinbase</div>" +
+        "<div class='rail-value'>" +
+          (percent !== null ? percent.toFixed(percent < 10 ? 1 : 0) + "%" : "-") +
+        "</div>" +
+        "<div class='rail-sub'>of " + rated + " BTC block" + (rated === 1 ? "" : "s") + "</div>" +
+        bar + lines.join("");
+    }
+
     function renderBlockStrip(data, nowEpoch) {
-      const container = document.getElementById("blockStrip");
+      const container = document.getElementById("blockStripTrack");
       if (!container) return;
+      renderBurnRail(data);
       const raw = data.recent_confirmed_blocks || [];
 
       // The same height appears many times across log sources (sibling
@@ -1069,10 +1245,23 @@
       }
 
       const extendKinds = new Map();
+      const extendKindsByBurn = new Map();
       for (const ext of data.tenure_extend_history || []) {
         const height = Number(ext && ext.block_height);
         if (Number.isFinite(height) && ext.kind) extendKinds.set(height, String(ext.kind));
+        const burn = Number(ext && ext.burn_height);
+        if (Number.isFinite(burn) && ext.kind) {
+          const kinds = extendKindsByBurn.get(burn) || [];
+          if (!kinds.includes(String(ext.kind))) kinds.push(String(ext.kind));
+          extendKindsByBurn.set(burn, kinds);
+        }
       }
+      const burnLedger = new Map();
+      for (const row of data.burn_block_ledger || []) {
+        const height = Number(row && row.burn_height);
+        if (Number.isFinite(height)) burnLedger.set(height, row);
+      }
+      const latestBurnHeight = Number(data.current_bitcoin_block_height);
       const burnByConsensus = data.burn_height_by_consensus_hash || {};
       const avgInterval = Number(data.avg_block_interval_seconds) || 15;
       const gapThreshold = Math.max(45, avgInterval * 3);
@@ -1092,17 +1281,43 @@
       const latestHeight = blocks[blocks.length - 1].height;
       const pieces = [];
       let prevTs = null;
-      for (const tenure of tenures) {
-        const isCurrent = tenure === tenures[tenures.length - 1];
-        const burnHeight = burnByConsensus[tenure.consensusHash];
+      for (let index = 0; index < tenures.length; index += 1) {
+        const tenure = tenures[index];
+        const isCurrent = index === tenures.length - 1;
+        const burnHeight = Number(burnByConsensus[tenure.consensusHash]);
+        const nextTenure = tenures[index + 1];
+        const nextBurnHeight = nextTenure
+          ? Number(burnByConsensus[nextTenure.consensusHash])
+          : NaN;
         const parts = [];
-        parts.push(
-          "<div class='tenure-label'><div class='tenure-btc'>₿</div><div class='tenure-burn'>" +
-            (burnHeight !== undefined && burnHeight !== null
-              ? escapeHtml(burnHeight)
-              : escapeHtml(shortHash(tenure.consensusHash, 6))) +
-            "</div></div>"
+        const burnHeights = tenureBurnHeights(
+          burnHeight,
+          nextBurnHeight,
+          isCurrent ? latestBurnHeight : NaN
         );
+        if (burnHeights.length) {
+          parts.push(
+            "<div class='tenure-label'>" +
+              burnHeights
+                .map((height, offset) =>
+                  burnRowHtml(
+                    height,
+                    burnLedger.get(height),
+                    extendKindsByBurn.get(height),
+                    offset === 0
+                  )
+                )
+                .join("") +
+            "</div>"
+          );
+        } else {
+          // No burn height mapped for this consensus hash yet.
+          parts.push(
+            "<div class='tenure-label'><div class='tenure-btc'>₿</div><div class='tenure-burn'>" +
+              escapeHtml(shortHash(tenure.consensusHash, 6)) +
+              "</div></div>"
+          );
+        }
         for (const block of tenure.blocks) {
           if (prevTs !== null && block.ts - prevTs >= gapThreshold) {
             parts.push(
@@ -1230,13 +1445,16 @@
         return "<span class='eta-now'>now</span> <span class='eta-since'>(for " +
           fmtAge(-delta) + ")</span>";
       };
-      const full = eta(data.tenure_extend_eligible_ts);
-      const readCt = eta(data.tenure_extend_read_count_eligible_ts);
+      // Only the weighted 70th-percentile timestamps across all signers are
+      // shown: that is what actually gates the miner's extend. Our own signer
+      // counts for its own weight alone, so its local countdown says little.
       const parts = [];
+      const full = eta(data.tenure_extend_agg_eligible_ts);
+      const readCt = eta(data.tenure_extend_agg_read_count_eligible_ts);
       if (full !== null) parts.push("extend " + full);
       if (readCt !== null) parts.push("read-ct " + readCt);
       el.innerHTML = parts.length
-        ? "signers accept: " + parts.join(" &middot; ")
+        ? "network 70%: " + parts.join(" &middot; ")
         : "";
     }
 
@@ -1521,7 +1739,16 @@
       const signers = data.signers || data.large_signers || [];
       document.getElementById("signersBody").innerHTML = signers.map((item) => {
         const name = item.name ? escapeHtml(item.name) : "-";
-        return "<tr><td>" + name + "</td><td class='mono'>" + escapeHtml(item.pubkey.slice(0, 18)) + "...</td><td>" + Number(item.estimated_weight || 0).toFixed(1) + "</td><td>" + Number(item.weight_percent_of_total || 0).toFixed(2) + "%</td><td>" + Math.round((item.participation_ratio || 0) * 100) + "% (" + (item.participation_samples || 0) + ")</td></tr>";
+        // null weight means the signer never reported an attributable weight
+        // (pre-patch signers log the weight on a line without the pubkey), which
+        // is distinct from a real zero -- show it as unknown.
+        const w = item.estimated_weight === null || item.estimated_weight === undefined
+          ? "<span class='muted' title='signer did not report an attributable weight'>&mdash;</span>"
+          : Number(item.estimated_weight).toFixed(1);
+        const wp = item.weight_percent_of_total === null || item.weight_percent_of_total === undefined
+          ? "<span class='muted'>&mdash;</span>"
+          : Number(item.weight_percent_of_total).toFixed(2) + "%";
+        return "<tr><td>" + name + "</td><td class='mono'>" + escapeHtml(item.pubkey.slice(0, 18)) + "...</td><td>" + w + "</td><td>" + wp + "</td><td>" + Math.round((item.participation_ratio || 0) * 100) + "% (" + (item.participation_samples || 0) + ")</td></tr>";
       }).join("");
 
       const proposals = data.recent_proposals || data.open_proposals || [];
