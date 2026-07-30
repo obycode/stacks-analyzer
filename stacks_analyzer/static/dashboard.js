@@ -1127,6 +1127,20 @@
       return heights;
     }
 
+    function tenureMoreTitle(count) {
+      return (
+        count + " earlier block" + (count === 1 ? "" : "s") +
+        " in this tenure not shown"
+      );
+    }
+
+    function tenureMoreHtml(count) {
+      return (
+        "<div class='tenure-more' data-count='" + count + "' title='" +
+        escapeAttr(tenureMoreTitle(count)) + "'>+" + count + "</div>"
+      );
+    }
+
     function renderBurnRail(data) {
       const rail = document.getElementById("burnRail");
       if (!rail) return;
@@ -1234,15 +1248,25 @@
           rec.consensusHash = entry.consensus_hash;
         }
       }
-      const blocks = Array.from(byHeight.values())
+      const allBlocks = Array.from(byHeight.values())
         .map((rec) => ({
           height: rec.height,
           ts: rec.signerTs !== null ? rec.signerTs : rec.lastNodeTs,
           consensusHash: rec.consensusHash,
         }))
         .filter((b) => Number.isFinite(b.ts))
-        .sort((a, b) => a.height - b.height)
-        .slice(-14);
+        .sort((a, b) => a.height - b.height);
+
+      // Blocks per tenure across everything observed, not just the window
+      // rendered below: a tenure's "+N" has to count the blocks the window
+      // leaves out as well as the ones trimmed to fit.
+      const tenureObserved = new Map();
+      for (const block of allBlocks) {
+        const key = block.consensusHash || "?";
+        tenureObserved.set(key, (tenureObserved.get(key) || 0) + 1);
+      }
+
+      const blocks = allBlocks.slice(-14);
       if (!blocks.length) {
         container.innerHTML = "<span class='muted'>No confirmed blocks yet</span>";
         return;
@@ -1322,6 +1346,12 @@
               "</div></div>"
           );
         }
+        // Blocks of this tenure the 14-block window already left out. The trim
+        // pass adds to this count rather than starting from zero, so "+N" is the
+        // tenure's real hidden total instead of just what did not fit.
+        const windowed = (tenureObserved.get(tenure.consensusHash) || tenure.blocks.length) -
+          tenure.blocks.length;
+        if (windowed > 0) parts.push(tenureMoreHtml(windowed));
         for (const block of tenure.blocks) {
           if (prevTs !== null && block.ts - prevTs >= gapThreshold) {
             parts.push(
@@ -1347,10 +1377,16 @@
               (extendKind === "ExtendAll" ? "EXTEND" : "READ-CT") +
               "</div>"
             : "";
+          // The age carries no " ago" suffix so that every chip is exactly as
+          // wide as its block height: a chip whose width grew with the age text
+          // changed how many chips fit between polls, which made the trimmed
+          // "+N" drift up and down by one.
           parts.push(
-            "<div class='" + chipClass + "'>" + ribbon +
+            "<div class='" + chipClass + "' title='" +
+              escapeAttr("#" + block.height + " confirmed " + fmtAge(age) + " ago") + "'>" +
+              ribbon +
               "<div class='chip-height'>" + hiroBlockLink(block.height, "#" + block.height) + "</div>" +
-              "<div class='chip-age'>" + fmtAge(age) + " ago</div>" +
+              "<div class='chip-age'>" + fmtAge(age) + "</div>" +
             "</div>"
           );
         }
@@ -1437,9 +1473,7 @@
         const count = Number(more.dataset.count) + 1;
         more.dataset.count = String(count);
         more.textContent = "+" + count;
-        more.title =
-          count + " earlier block" + (count === 1 ? "" : "s") +
-          " in this tenure (off screen)";
+        more.title = tenureMoreTitle(count);
       }
     }
 
