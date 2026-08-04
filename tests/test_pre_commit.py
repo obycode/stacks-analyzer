@@ -207,3 +207,59 @@ class TestPreCommitLaggards(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSignerIdentifierJoin(unittest.TestCase):
+    """Pre-commits are keyed by address, acceptances by pubkey; they must merge."""
+
+    PUBKEY = "0302328212d5e430a8a880f8e2365a8f976ee50490ff030c106866c0b789eae91a"
+
+    def _driver(self, logged_address=None):
+        from stacks_analyzer.c32 import pubkey_to_address
+
+        detector = Detector(DetectorConfig(large_signer_min_samples=1))
+        parser = LogParser()
+        address = pubkey_to_address(self.PUBKEY)
+
+        def feed(line):
+            for event in parser.parse_line("signer", line):
+                detector.process_event(event)
+
+        feed(proposal_line("1785808540.000"))
+        feed(sent_line("1785808540.500"))
+        # Their pre-commit is 2s behind our proposal receipt, and crosses 70%.
+        feed(pre_commit_line("1785808542.000", address, 624, 2600, 2558, True))
+        # Their acceptance lands 0.4s after the crossing.
+        addr_field = (
+            ", signer_address: %s" % logged_address if logged_address else ""
+        )
+        feed(
+            (PREFIX % "1785808542.400")
+            + ("Received block acceptance, signer_pubkey: %s%s, "
+               "signer_signature_hash: %s, block_height: 8698973, signer_weight: 624, "
+               "total_weight: 3654" % (self.PUBKEY, addr_field, HASH))
+        )
+        return detector, address
+
+    def test_derived_address_merges_both_phases_onto_one_row(self) -> None:
+        detector, address = self._driver()
+        rows = detector._signer_phase_rows()
+        self.assertEqual(len(rows), 1, rows)
+        row = rows[0]
+        self.assertEqual(row["pubkey"], self.PUBKEY)
+        self.assertEqual(row["signer_address"], address)
+        self.assertAlmostEqual(float(row["pre_commit_median_seconds"]), 2.0, places=2)
+        self.assertAlmostEqual(float(row["acceptance_median_seconds"]), 0.4, places=2)
+        self.assertEqual(detector.address_derivation_mismatches, 0)
+
+    def test_logged_address_is_preferred_and_agrees_with_derivation(self) -> None:
+        from stacks_analyzer.c32 import pubkey_to_address
+
+        detector, address = self._driver(logged_address=pubkey_to_address(self.PUBKEY))
+        rows = detector._signer_phase_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(detector.address_derivation_mismatches, 0)
+
+    def test_disagreeing_logged_address_is_counted_not_silently_joined(self) -> None:
+        detector, _ = self._driver(logged_address="SP000000000000000000002Q6VF78")
+        self.assertEqual(detector.address_derivation_mismatches, 1)

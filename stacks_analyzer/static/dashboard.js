@@ -2106,26 +2106,38 @@
         meta.textContent = "";
         return;
       }
-      body.innerHTML = rows.slice(0, 20).map((row) => {
-        const median = Number(row.median_seconds);
+      function cell(value) {
+        if (value === null || value === undefined) return "<td class='muted'>&mdash;</td>";
+        const n = Number(value);
         // Negative pre-commit lateness means that signer was ahead of us.
-        const cls = median < 0
-          ? "phase-ahead"
-          : median > 30 ? "phase-very-late" : median > 5 ? "phase-late" : "";
+        const cls = n < 0 ? "phase-ahead" : n > 30 ? "phase-very-late" : n > 5 ? "phase-late" : "";
+        return "<td class='" + cls + "'>" + escapeHtml(formatSeconds(n)) + "</td>";
+      }
+
+      body.innerHTML = rows.slice(0, 25).map((row) => {
+        const ident = row.pubkey || row.signer_address || "?";
         const label = row.name
           ? escapeHtml(row.name)
-          : escapeHtml(String(row.identifier).slice(0, 16)) + "...";
-        const phase = row.kind === "pre_commit" ? "pre-commit lateness" : "acceptance reaction";
-        return "<tr><td class='mono'>" + label + "</td><td>" + escapeHtml(phase) +
-          "</td><td class='" + cls + "'>" + escapeHtml(formatSeconds(median)) +
-          "</td><td>" + escapeHtml(formatSeconds(row.worst_seconds)) +
-          "</td><td>" + (row.samples || 0) + "</td></tr>";
+          : escapeHtml(String(ident).slice(0, 16)) + "...";
+        const samples = (row.pre_commit_samples || 0) + "/" + (row.acceptance_samples || 0);
+        return "<tr><td class='mono' title='" + escapeHtml(String(ident)) + "'>" + label + "</td>" +
+          cell(row.pre_commit_median_seconds) +
+          cell(row.pre_commit_worst_seconds) +
+          cell(row.acceptance_median_seconds) +
+          "<td>" + escapeHtml(samples) + "</td></tr>";
       }).join("");
+
       const ahead = rows.filter((row) =>
-        row.kind === "pre_commit" && Number(row.median_seconds) < 0).length;
-      meta.textContent = ahead
-        ? ahead + " signer(s) consistently ahead of this node — proposals are reaching us late"
-        : "pre-commit lateness measured from our proposal receipt; acceptance reaction from the 70% pre-commit crossing";
+        Number(row.pre_commit_median_seconds) < 0).length;
+      const mismatches = data.address_derivation_mismatches || 0;
+      if (mismatches) {
+        meta.textContent = mismatches + " address/pubkey derivation mismatch(es) — joined rows are unreliable";
+      } else if (ahead) {
+        meta.textContent = ahead + " signer(s) consistently ahead of this node — proposals are reaching us late";
+      } else {
+        meta.textContent = "pre-commit lateness from our proposal receipt; acceptance reaction from the 70% pre-commit crossing (" +
+          (data.signer_address_map_size || 0) + " signers mapped)";
+      }
     }
 
     async function load() {

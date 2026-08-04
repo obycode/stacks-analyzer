@@ -5,6 +5,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Set, Tuple
 
+from .c32 import pubkey_to_address
 from .events import ParsedEvent
 
 ZERO_HASH = "0" * 64
@@ -326,6 +327,15 @@ class Detector:
         # Completed per-block phase milestones, newest last. Feeds the stacked phase
         # bars on the dashboard.
         self.block_phase_history: Deque[Dict[str, object]] = deque(maxlen=200)
+        # Address -> pubkey, so pre-commit timings (keyed by address) can be joined to
+        # acceptance timings and signer names (keyed by pubkey). Populated from the
+        # acceptance log's own `signer_address` when present, otherwise derived from
+        # the pubkey -- the address is a pure function of it.
+        self.signer_address_to_pubkey: Dict[str, str] = {}
+        # Counts cases where a logged address disagreed with the derived one. Should
+        # stay at zero; a non-zero value means the derivation assumption is wrong and
+        # the joined rows cannot be trusted.
+        self.address_derivation_mismatches: int = 0
         # Pre-commits that arrived for blocks we had not yet seen proposed: a direct
         # indicator that our proposal delivery is lagging the rest of the set.
         self.pre_commits_before_proposal: Deque[float] = deque(maxlen=256)
@@ -978,6 +988,9 @@ class Detector:
                 if state.first_acceptance_ts is None:
                     state.first_acceptance_ts = event.ts
                 if signer_pubkey:
+                    self._link_signer_identifiers(
+                        signer_pubkey, event.fields.get("signer_address")
+                    )
                     self.seen_signers.add(signer_pubkey)
                     if (
                         signer_pubkey not in state.signers
@@ -1546,46 +1559,87 @@ class Detector:
             return ordered[mid]
         return (ordered[mid - 1] + ordered[mid]) / 2.0
 
-    def _signer_phase_rows(self) -> List[Dict[str, object]]:
-        """Per-signer timing for both phases, so the pattern is readable.
+    def _link_signer_identifiers(
+        self, pubkey: str, logged_address: Optional[str]
+    ) -> None:
+        """Record the address <-> pubkey link for a signer.
 
-        Reading the two columns together separates causes that a single latency
-        number conflates:
+        Prefers the address the signer logged; falls back to deriving it, which is
+        exact because the address is just c32(hash160(pubkey)). When both are
+        available they are compared, so a wrong derivation assumption surfaces as a
+        mismatch count instead of silently producing bogus joins.
+        """
+        derived = pubkey_to_address(pubkey)
+        if logged_address:
+            if derived is not None and derived != logged_address:
+                self.address_derivation_mismatches += 1
+            self.signer_address_to_pubkey[logged_address] = pubkey
+        elif derived is not None:
+            self.signer_address_to_pubkey[derived] = pubkey
+
+    def _signer_phase_rows(self) -> List[Dict[str, object]]:
+        """Per-signer timing for both phases on one row, so the pattern is readable.
+
+        Reading the two numbers together separates causes that a single latency
+        conflates:
           both late            -> that host or its network is behind generally
           pre-commit late only -> proposals are reaching that signer late
           reaction late only   -> its response path is slow, not its input
           pre-commit negative  -> it is ahead of us; *we* are receiving late
-        Pre-commit is keyed by address and acceptance by pubkey (the logs carry
-        different identifiers), so rows are emitted per identifier, not joined.
+
+        Pre-commit timings are keyed by address and acceptances by pubkey, so they
+        are joined through `signer_address_to_pubkey` in order to name the signer and
+        show both phases together. An address with no known pubkey still gets a row.
         """
-        rows: List[Dict[str, object]] = []
         min_samples = self.config.large_signer_min_samples
+        merged: Dict[str, Dict[str, object]] = {}
+
+        def slot(pubkey: Optional[str], address: Optional[str]) -> Dict[str, object]:
+            key = pubkey or address or "?"
+            row = merged.get(key)
+            if row is None:
+                row = {
+                    "pubkey": pubkey,
+                    "signer_address": address,
+                    "name": self._signer_label(pubkey) if pubkey else None,
+                    "pre_commit_median_seconds": None,
+                    "pre_commit_worst_seconds": None,
+                    "pre_commit_samples": 0,
+                    "acceptance_median_seconds": None,
+                    "acceptance_worst_seconds": None,
+                    "acceptance_samples": 0,
+                }
+                merged[key] = row
+            if address and not row.get("signer_address"):
+                row["signer_address"] = address
+            return row
+
         for address, samples in self.signer_pre_commit_lateness.items():
             if len(samples) < min_samples:
                 continue
-            rows.append(
-                {
-                    "identifier": address,
-                    "kind": "pre_commit",
-                    "median_seconds": self._median(samples),
-                    "worst_seconds": max(samples),
-                    "samples": len(samples),
-                }
-            )
+            pubkey = self.signer_address_to_pubkey.get(address)
+            row = slot(pubkey, address)
+            row["pre_commit_median_seconds"] = self._median(samples)
+            row["pre_commit_worst_seconds"] = max(samples)
+            row["pre_commit_samples"] = len(samples)
+
         for pubkey, samples in self.signer_acceptance_reaction.items():
             if len(samples) < min_samples:
                 continue
-            rows.append(
-                {
-                    "identifier": pubkey,
-                    "name": self._signer_label(pubkey),
-                    "kind": "acceptance_reaction",
-                    "median_seconds": self._median(samples),
-                    "worst_seconds": max(samples),
-                    "samples": len(samples),
-                }
-            )
-        rows.sort(key=lambda row: float(row["median_seconds"]), reverse=True)
+            row = slot(pubkey, None)
+            row["acceptance_median_seconds"] = self._median(samples)
+            row["acceptance_worst_seconds"] = max(samples)
+            row["acceptance_samples"] = len(samples)
+
+        def sort_key(row: Dict[str, object]) -> float:
+            candidates = [
+                row.get("pre_commit_median_seconds"),
+                row.get("acceptance_median_seconds"),
+            ]
+            values = [float(v) for v in candidates if isinstance(v, (int, float))]
+            return max(values) if values else float("-inf")
+
+        rows = sorted(merged.values(), key=sort_key, reverse=True)
         return rows
 
     def _pre_commit_laggards(self, limit: int = 3) -> List[Tuple[str, float, int]]:
@@ -3567,6 +3621,8 @@ class Detector:
             "block_phases": list(self.block_phase_history)[-60:],
             "phase_percentiles": self._phase_percentiles(),
             "signer_phase_rows": self._signer_phase_rows(),
+            "signer_address_map_size": len(self.signer_address_to_pubkey),
+            "address_derivation_mismatches": self.address_derivation_mismatches,
         }
 
     def _current_large_signers(self) -> List[Tuple[str, float]]:

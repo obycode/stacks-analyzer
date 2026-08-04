@@ -969,6 +969,9 @@ class LogParser:
                         fields={
                             "signer_signature_hash": signature_hash,
                             "signer_pubkey": extract_field(line, "signer_pubkey"),
+                            # Present only on signers that log it; when absent the
+                            # address is derived from the pubkey instead (see c32.py).
+                            "signer_address": extract_field(line, "signer_address"),
                             "total_weight_approved": int(total_weight_approved)
                             if total_weight_approved
                             else None,
