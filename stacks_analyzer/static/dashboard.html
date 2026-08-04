@@ -101,6 +101,27 @@
       </table>
     </div>
 
+    <div class="card card-phases">
+      <div class="panel-title">
+        Block Approval Phases
+        <span class="phase-legend" id="phaseLegend"></span>
+      </div>
+      <svg id="phaseChart"></svg>
+      <div class="chart-meta" id="phaseMeta">No completed blocks yet</div>
+      <div class="phase-percentiles" id="phasePercentiles"></div>
+    </div>
+
+    <div class="card card-signer-phases">
+      <div class="panel-title">Signer Phase Timing</div>
+      <table>
+        <thead>
+          <tr><th>Signer</th><th>Phase</th><th>Median</th><th>Worst</th><th>Samples</th></tr>
+        </thead>
+        <tbody id="signerPhasesBody"></tbody>
+      </table>
+      <div class="chart-meta" id="signerPhasesMeta"></div>
+    </div>
+
     <div class="card card-sortitions">
       <div class="panel-title">Recent Sortitions (Latest 3 Burn Heights)</div>
       <div class="sortition-grid" id="sortitionCards"></div>

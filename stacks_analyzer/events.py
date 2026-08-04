@@ -90,6 +90,28 @@ def extract_field(line: str, name: str) -> Optional[str]:
 EXTEND_TS_SENTINEL_CUTOFF = 4102444800
 
 
+def _opt_int(raw: Optional[str]) -> Optional[int]:
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _opt_bool(raw: Optional[str]) -> Optional[bool]:
+    if raw is None:
+        return None
+    return raw.strip().lower() == "true"
+
+
+# Our own outbound pre-commit. The hash follows "for" rather than being a
+# "key: value" pair, so extract_field cannot pick it up.
+SIGNER_PRE_COMMIT_SENT_RE = re.compile(
+    r"Broadcasting block pre-commit to stacks node for (?P<hash>[0-9a-f]{64})"
+)
+
+
 def _extend_timestamp(line: str, name: str) -> Optional[int]:
     raw = extract_field(line, name)
     if not raw:
@@ -851,6 +873,75 @@ class LogParser:
                                 if burn_match
                                 else None
                             )
+                        },
+                        line=line,
+                    )
+                )
+
+            # Pre-commit phase. A signer broadcasts its pre-commit as soon as it has
+            # validated a proposal, then waits for 70% of the signer set's weight to
+            # pre-commit before sending its actual block response. That wait is where
+            # multi-minute stalls hide, so track both directions of it.
+            #
+            # Ordering matters: the "unknown block" message contains the shorter
+            # "Received block pre-commit" prefix.
+            if "Received block pre-commit for an unknown block" in line:
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_block_pre_commit_unknown",
+                        ts=ts,
+                        fields={
+                            "signer_signature_hash": extract_field(
+                                line, "signer_signature_hash"
+                            ),
+                            "signer_address": extract_field(line, "signer_address"),
+                            "signer_weight": _opt_int(extract_field(line, "signer_weight")),
+                        },
+                        line=line,
+                    )
+                )
+            elif "Received block pre-commit" in line:
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_block_pre_commit",
+                        ts=ts,
+                        fields={
+                            "signer_signature_hash": extract_field(
+                                line, "signer_signature_hash"
+                            ),
+                            "signer_address": extract_field(line, "signer_address"),
+                            "signer_weight": _opt_int(extract_field(line, "signer_weight")),
+                            "pre_commit_weight": _opt_int(
+                                extract_field(line, "pre_commit_weight")
+                            ),
+                            "pre_commit_weight_required": _opt_int(
+                                extract_field(line, "pre_commit_weight_required")
+                            ),
+                            "total_weight": _opt_int(extract_field(line, "total_weight")),
+                            "pre_commit_threshold_reached": _opt_bool(
+                                extract_field(line, "pre_commit_threshold_reached")
+                            ),
+                            "already_signed": _opt_bool(
+                                extract_field(line, "already_signed")
+                            ),
+                            "block_height": _opt_int(extract_field(line, "block_height")),
+                            "consensus_hash": extract_field(line, "consensus_hash"),
+                        },
+                        line=line,
+                    )
+                )
+
+            pre_commit_sent = SIGNER_PRE_COMMIT_SENT_RE.search(line)
+            if pre_commit_sent:
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_block_pre_commit_sent",
+                        ts=ts,
+                        fields={
+                            "signer_signature_hash": pre_commit_sent.group("hash"),
                         },
                         line=line,
                     )

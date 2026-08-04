@@ -62,6 +62,11 @@ class DetectorConfig:
     slow_signer_validation_ms: int = 10_000
     slow_validation_window: int = 10
     slow_validation_min_count: int = 3
+    # A pre-commit arriving for a block we have not seen proposed means other signers
+    # got the proposal before we did. A handful is normal jitter; a burst means our
+    # proposal delivery is lagging the network.
+    pre_commit_before_proposal_window_seconds: int = 120
+    pre_commit_before_proposal_threshold: int = 5
 
 
 @dataclass
@@ -89,6 +94,26 @@ class ProposalState:
     max_reject_percent: float = 0.0
     total_weight: Optional[int] = None
     last_reject_ts: Optional[float] = None
+    # Pre-commit phase. `own_pre_commit_ts` is when we broadcast ours (i.e. when we
+    # finished validating); `pre_commit_threshold_ts` is when 70% of the set's weight
+    # had pre-committed, which is what releases our block response. The span between
+    # the two is where multi-minute stalls hide, and it is invisible without the
+    # `Received block pre-commit` signer log.
+    own_pre_commit_ts: Optional[float] = None
+    pre_commit_threshold_ts: Optional[float] = None
+    pre_commit_signers: Dict[str, float] = field(default_factory=dict)
+    max_pre_commit_weight: int = 0
+    pre_commit_weight_required: Optional[int] = None
+    first_pre_commit_ts: Optional[float] = None
+    first_acceptance_ts: Optional[float] = None
+    # True only when start_ts came from an actual proposal event. If a pre-commit or
+    # acceptance created the state first, start_ts is not a proposal-receipt time and
+    # latencies measured against it would be meaningless.
+    proposal_seen: bool = False
+    # Cumulative pre-commit weight over time: (ts, weight). Lets the dashboard show
+    # the *shape* of the ramp -- a smooth climb means propagation was uniformly slow,
+    # a flat line then a step means one high-weight signer was holding everyone up.
+    pre_commit_ramp: List[Tuple[float, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -280,6 +305,30 @@ class Detector:
         self.signer_extend_reports: Dict[str, Dict[str, Dict[str, object]]] = {}
         self.signer_extend_report_order: Deque[str] = deque(maxlen=32)
         self.signer_extend_reports_block: Optional[str] = None
+
+        # Per-signer pre-commit lateness, in seconds from when *we* received the
+        # proposal to when that signer's pre-commit reached us. A signer that is
+        # consistently seconds-to-minutes behind is either slow to validate or is
+        # not receiving proposals promptly -- the distinction we could not make
+        # before this log existed. Keyed by signer address (pre-commits carry an
+        # address, not a pubkey).
+        self.signer_pre_commit_lateness: Dict[str, Deque[float]] = defaultdict(
+            lambda: deque(maxlen=self.config.large_signer_window)
+        )
+        # Per-signer acceptance *reaction* time: seconds from the moment 70% pre-commit
+        # weight was reached to that signer's acceptance arriving. Deliberately not
+        # measured from the proposal: every signer withholds its acceptance until it
+        # sees the pre-commit threshold, so proposal-relative timing is dominated by a
+        # shared wait and says nothing about the individual signer.
+        self.signer_acceptance_reaction: Dict[str, Deque[float]] = defaultdict(
+            lambda: deque(maxlen=self.config.large_signer_window)
+        )
+        # Completed per-block phase milestones, newest last. Feeds the stacked phase
+        # bars on the dashboard.
+        self.block_phase_history: Deque[Dict[str, object]] = deque(maxlen=200)
+        # Pre-commits that arrived for blocks we had not yet seen proposed: a direct
+        # indicator that our proposal delivery is lagging the rest of the set.
+        self.pre_commits_before_proposal: Deque[float] = deque(maxlen=256)
 
         self.last_alert_ts: Dict[str, float] = {}
         self.active_stalls: Set[str] = set()
@@ -785,12 +834,75 @@ class Detector:
                         burn_height=event.fields.get("burn_height"),
                     ),
                 )
+                if not state.proposal_seen:
+                    # Another signer's pre-commit may have created this state before
+                    # the proposal reached us, in which case start_ts was its arrival
+                    # time. Correct it, then backfill lateness for the pre-commits we
+                    # already saw -- they come out negative, which is precisely the
+                    # "this node received the proposal last" signal.
+                    state.start_ts = event.ts
+                    state.proposal_seen = True
+                    for address, seen_ts in state.pre_commit_signers.items():
+                        self.signer_pre_commit_lateness[address].append(
+                            seen_ts - event.ts
+                        )
                 self._record_proposal_activity(
                     signature_hash=signature_hash,
                     state=state,
                     ts=event.ts,
                     is_open=True,
                 )
+
+        elif event.kind == "signer_block_pre_commit_sent":
+            signature_hash = event.fields.get("signer_signature_hash")
+            if signature_hash and not self._is_recently_closed(signature_hash, event.ts):
+                state = self.proposals.setdefault(signature_hash, ProposalState(event.ts))
+                if state.own_pre_commit_ts is None:
+                    state.own_pre_commit_ts = event.ts
+
+        elif event.kind == "signer_block_pre_commit":
+            signature_hash = event.fields.get("signer_signature_hash")
+            if signature_hash and not self._is_recently_closed(signature_hash, event.ts):
+                state = self.proposals.setdefault(signature_hash, ProposalState(event.ts))
+                block_height = event.fields.get("block_height")
+                if isinstance(block_height, int):
+                    state.block_height = block_height
+                total_weight = event.fields.get("total_weight")
+                if isinstance(total_weight, int):
+                    state.total_weight = total_weight
+                required = event.fields.get("pre_commit_weight_required")
+                if isinstance(required, int):
+                    state.pre_commit_weight_required = required
+                weight = event.fields.get("pre_commit_weight")
+                if isinstance(weight, int):
+                    state.max_pre_commit_weight = max(state.max_pre_commit_weight, weight)
+                    if len(state.pre_commit_ramp) < 64:
+                        state.pre_commit_ramp.append((event.ts, weight))
+
+                if state.first_pre_commit_ts is None:
+                    state.first_pre_commit_ts = event.ts
+
+                address = event.fields.get("signer_address")
+                if address and address not in state.pre_commit_signers:
+                    state.pre_commit_signers[address] = event.ts
+                    # Lateness is measured against our own receipt of the proposal --
+                    # the only common reference point available locally. The sign is
+                    # deliberately preserved: a negative value means that signer
+                    # pre-committed before the proposal reached us, which is the
+                    # clearest single indicator that *this* node is the late one.
+                    if state.proposal_seen:
+                        self.signer_pre_commit_lateness[address].append(
+                            event.ts - state.start_ts
+                        )
+
+                if (
+                    event.fields.get("pre_commit_threshold_reached")
+                    and state.pre_commit_threshold_ts is None
+                ):
+                    state.pre_commit_threshold_ts = event.ts
+
+        elif event.kind == "signer_block_pre_commit_unknown":
+            self.pre_commits_before_proposal.append(event.ts)
 
         elif event.kind == "signer_block_validate_ok":
             self.last_signer_validation_ts = event.ts
@@ -863,8 +975,17 @@ class Detector:
                 if self._is_recently_closed(signature_hash, event.ts):
                     return alerts
                 state = self.proposals.setdefault(signature_hash, ProposalState(event.ts))
+                if state.first_acceptance_ts is None:
+                    state.first_acceptance_ts = event.ts
                 if signer_pubkey:
                     self.seen_signers.add(signer_pubkey)
+                    if (
+                        signer_pubkey not in state.signers
+                        and state.pre_commit_threshold_ts is not None
+                    ):
+                        self.signer_acceptance_reaction[signer_pubkey].append(
+                            event.ts - state.pre_commit_threshold_ts
+                        )
                     state.signers.add(signer_pubkey)
                 if block_height is not None:
                     state.block_height = block_height
@@ -922,7 +1043,9 @@ class Detector:
                 if self._is_recently_closed(signature_hash, event.ts):
                     return alerts
                 state = self.proposals.setdefault(signature_hash, ProposalState(event.ts))
-                state.threshold_ts = event.ts
+                if state.threshold_ts is None:
+                    state.threshold_ts = event.ts
+                    self._record_block_phases(signature_hash, state, event.ts)
                 percent = event.fields.get("percent_approved")
                 block_height = event.fields.get("block_height")
                 signer_pubkey = event.fields.get("signer_pubkey")
@@ -1169,6 +1292,7 @@ class Detector:
         self._detect_stalls(ts, alerts)
         self._detect_mempool_empty(ts, alerts)
         self._detect_proposal_timeouts(ts, alerts)
+        self._detect_proposal_delivery_lag(ts, alerts)
         self._detect_large_signer_participation(ts, alerts)
 
         report: Optional[str] = None
@@ -1221,10 +1345,20 @@ class Detector:
                 self.completed_with_threshold / float(self.completed_proposals)
             ) * 100.0
 
+        laggards = self._pre_commit_laggards()
+        if laggards:
+            pre_commit_summary = "; ".join(
+                "%s median=%.1fs(%d)" % (address[:12], median, count)
+                for address, median, count in laggards
+            )
+        else:
+            pre_commit_summary = "n/a"
+
         return (
             "[REPORT] uptime=%ss | lines(node=%d signer=%d) | tips_age=%ss | "
             "proposal_age=%ss | open_proposals=%d | "
-            "completed=%d threshold=%.1f%% | large_signers=%s"
+            "completed=%d threshold=%.1f%% | large_signers=%s | "
+            "slowest_precommit=%s | precommit_before_proposal=%d"
             % (
                 uptime,
                 self.processed_lines.get("node", 0),
@@ -1235,6 +1369,8 @@ class Detector:
                 self.completed_proposals,
                 threshold_ratio,
                 large_summary,
+                pre_commit_summary,
+                len(self.pre_commits_before_proposal),
             )
         )
 
@@ -1299,6 +1435,208 @@ class Detector:
             ts=ts,
         )
 
+    def _record_block_phases(
+        self, signature_hash: str, state: ProposalState, threshold_ts: float
+    ) -> None:
+        """Snapshot a completed block's phase durations.
+
+        Segments are consecutive and sum to the total, so they stack cleanly:
+          validate         proposal received -> we broadcast our pre-commit
+          precommit_wait   our pre-commit   -> 70% pre-commit weight reached
+          to_first_accept  70% pre-commit   -> first acceptance arrives
+          approval_gather  first acceptance -> 70% approval (threshold)
+        Any segment whose endpoints are unknown is None rather than 0, so the
+        dashboard can distinguish "instant" from "not observable on this build".
+        """
+        if not state.proposal_seen:
+            return
+
+        def span(start: Optional[float], end: Optional[float]) -> Optional[float]:
+            if start is None or end is None:
+                return None
+            return max(0.0, end - start)
+
+        self.block_phase_history.append(
+            {
+                "signature_hash": signature_hash,
+                "block_height": state.block_height,
+                "proposal_ts": state.start_ts,
+                "total_seconds": max(0.0, threshold_ts - state.start_ts),
+                "validate": span(state.start_ts, state.own_pre_commit_ts),
+                "precommit_wait": span(
+                    state.own_pre_commit_ts, state.pre_commit_threshold_ts
+                ),
+                "to_first_accept": span(
+                    state.pre_commit_threshold_ts, state.first_acceptance_ts
+                ),
+                "approval_gather": span(state.first_acceptance_ts, threshold_ts),
+                # Milestones as offsets from the proposal, which is what the four
+                # headline latencies reduce to.
+                "to_first_pre_commit": span(state.start_ts, state.first_pre_commit_ts),
+                "to_pre_commit_threshold": span(
+                    state.start_ts, state.pre_commit_threshold_ts
+                ),
+                "to_first_acceptance": span(state.start_ts, state.first_acceptance_ts),
+                "to_approval_threshold": max(0.0, threshold_ts - state.start_ts),
+                "pre_commit_signers": len(state.pre_commit_signers),
+                "pre_commit_ramp": list(state.pre_commit_ramp),
+                "pre_commit_weight_required": state.pre_commit_weight_required,
+            }
+        )
+
+    def _phase_percentiles(self) -> Dict[str, object]:
+        """p50/p95 for each milestone over the retained block history."""
+        keys = (
+            "to_first_pre_commit",
+            "to_pre_commit_threshold",
+            "to_first_acceptance",
+            "to_approval_threshold",
+        )
+        out: Dict[str, object] = {}
+        for key in keys:
+            values = sorted(
+                float(row[key])
+                for row in self.block_phase_history
+                if isinstance(row.get(key), (int, float))
+            )
+            if not values:
+                out[key] = None
+                continue
+            out[key] = {
+                "p50": values[len(values) // 2],
+                "p95": values[min(len(values) - 1, int(len(values) * 0.95))],
+                "max": values[-1],
+                "samples": len(values),
+            }
+        return out
+
+    def _detect_proposal_delivery_lag(self, ts: float, alerts: List[Alert]) -> None:
+        """Alert when other signers keep pre-committing blocks we have not seen.
+
+        This is the mirror image of a pre-commit starvation stall: instead of us
+        waiting on the rest of the set, the set is ahead of us, which means our node
+        is receiving miner proposals late over the `.miners` StackerDB.
+        """
+        window = self.config.pre_commit_before_proposal_window_seconds
+        while (
+            self.pre_commits_before_proposal
+            and self.pre_commits_before_proposal[0] < ts - window
+        ):
+            self.pre_commits_before_proposal.popleft()
+
+        count = len(self.pre_commits_before_proposal)
+        if count >= self.config.pre_commit_before_proposal_threshold:
+            self._emit_alert(
+                alerts=alerts,
+                key="proposal-delivery-lag",
+                severity="warning",
+                message=(
+                    "Proposal delivery lagging: %d pre-commits in %ds arrived for blocks"
+                    " we had not seen proposed -- other signers are receiving proposals"
+                    " before this node" % (count, window)
+                ),
+                ts=ts,
+            )
+
+    @staticmethod
+    def _median(samples) -> float:
+        ordered = sorted(samples)
+        mid = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[mid]
+        return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+    def _signer_phase_rows(self) -> List[Dict[str, object]]:
+        """Per-signer timing for both phases, so the pattern is readable.
+
+        Reading the two columns together separates causes that a single latency
+        number conflates:
+          both late            -> that host or its network is behind generally
+          pre-commit late only -> proposals are reaching that signer late
+          reaction late only   -> its response path is slow, not its input
+          pre-commit negative  -> it is ahead of us; *we* are receiving late
+        Pre-commit is keyed by address and acceptance by pubkey (the logs carry
+        different identifiers), so rows are emitted per identifier, not joined.
+        """
+        rows: List[Dict[str, object]] = []
+        min_samples = self.config.large_signer_min_samples
+        for address, samples in self.signer_pre_commit_lateness.items():
+            if len(samples) < min_samples:
+                continue
+            rows.append(
+                {
+                    "identifier": address,
+                    "kind": "pre_commit",
+                    "median_seconds": self._median(samples),
+                    "worst_seconds": max(samples),
+                    "samples": len(samples),
+                }
+            )
+        for pubkey, samples in self.signer_acceptance_reaction.items():
+            if len(samples) < min_samples:
+                continue
+            rows.append(
+                {
+                    "identifier": pubkey,
+                    "name": self._signer_label(pubkey),
+                    "kind": "acceptance_reaction",
+                    "median_seconds": self._median(samples),
+                    "worst_seconds": max(samples),
+                    "samples": len(samples),
+                }
+            )
+        rows.sort(key=lambda row: float(row["median_seconds"]), reverse=True)
+        return rows
+
+    def _pre_commit_laggards(self, limit: int = 3) -> List[Tuple[str, float, int]]:
+        """Signers whose pre-commits consistently reach us latest.
+
+        Returns (address, median lateness in seconds, sample count), worst first.
+        Median rather than mean so that one stalled block does not dominate.
+        """
+        rows: List[Tuple[str, float, int]] = []
+        for address, samples in self.signer_pre_commit_lateness.items():
+            if len(samples) < self.config.large_signer_min_samples:
+                continue
+            rows.append((address, self._median(samples), len(samples)))
+        rows.sort(key=lambda item: item[1], reverse=True)
+        return rows[:limit]
+
+    def _proposal_phase(self, state: ProposalState, ts: float) -> Optional[str]:
+        """Attribute a stalled proposal's elapsed time to a pipeline phase.
+
+        The three phases a proposal passes through are: we validate it and
+        pre-commit; we wait for 70% of the signer set's weight to pre-commit; the
+        miner gathers signatures until the acceptance threshold. Naming which one
+        is stuck is the difference between "our node is slow", "the proposal never
+        reached the other signers", and "signers are not responding".
+
+        Needs the `Received block pre-commit` signer log for the middle phase;
+        without it only local validation can be distinguished.
+        """
+        if state.own_pre_commit_ts is None:
+            return "awaiting-local-validation waited=%.0fs" % (ts - state.start_ts)
+
+        if state.pre_commit_threshold_ts is None:
+            if not state.pre_commit_signers:
+                # No pre-commit visibility at all (older signer build).
+                return None
+            return (
+                "precommit-starvation have=%d/%s from=%d_signers"
+                " validated_in=%.1fs waited=%.0fs"
+                % (
+                    state.max_pre_commit_weight,
+                    state.pre_commit_weight_required
+                    if state.pre_commit_weight_required is not None
+                    else "?",
+                    len(state.pre_commit_signers),
+                    state.own_pre_commit_ts - state.start_ts,
+                    ts - state.own_pre_commit_ts,
+                )
+            )
+
+        return "signature-gathering waited=%.0fs" % (ts - state.pre_commit_threshold_ts)
+
     def _detect_proposal_timeouts(self, ts: float, alerts: List[Alert]) -> None:
         for signature_hash, state in list(self.proposals.items()):
             age = ts - state.start_ts
@@ -1344,6 +1682,9 @@ class Detector:
                         parts.append("rejected~%.1f%%" % state.max_reject_percent)
                     parts.append("age=%.0fs" % age)
                     parts.append("Δt=%.1fs" % (burn_ts - state.start_ts))
+                    phase = self._proposal_phase(state, ts)
+                    if phase:
+                        parts.append("phase=%s" % phase)
                     self._emit_alert(
                         alerts=alerts,
                         key="proposal-timeout-boundary-%s" % signature_hash,
@@ -1352,6 +1693,8 @@ class Detector:
                         ts=ts,
                     )
                 else:
+                    phase = self._proposal_phase(state, ts)
+                    phase_suffix = " | phase=%s" % phase if phase else ""
                     reject_reasons = state.reject_reasons
                     reject_count = len(state.reject_signers)
                     if reject_reasons:
@@ -1388,7 +1731,7 @@ class Detector:
                             alerts=alerts,
                             key="proposal-timeout-%s" % signature_hash,
                             severity="warning",
-                            message=message,
+                            message=message + phase_suffix,
                             ts=ts,
                         )
                     else:
@@ -1406,7 +1749,7 @@ class Detector:
                             alerts=alerts,
                             key="proposal-timeout-%s" % signature_hash,
                             severity="critical",
-                            message=message,
+                            message=message + phase_suffix,
                             ts=ts,
                         )
 
@@ -2848,6 +3191,13 @@ class Detector:
                     "max_reject_percent": state.max_reject_percent,
                     "threshold_seen": state.threshold_ts is not None,
                     "unique_signers_seen": len(state.signers),
+                    # Which pipeline phase this proposal is currently sitting in, so a
+                    # stuck proposal on the dashboard says *why* it is stuck.
+                    "phase": self._proposal_phase(state, ts),
+                    "pre_commit_signers_seen": len(state.pre_commit_signers),
+                    "pre_commit_weight": state.max_pre_commit_weight or None,
+                    "pre_commit_weight_required": state.pre_commit_weight_required,
+                    "pre_commit_threshold_seen": state.pre_commit_threshold_ts is not None,
                 }
             )
         open_proposals.sort(key=lambda row: row["age_seconds"], reverse=True)
@@ -3208,6 +3558,15 @@ class Detector:
             "signers": signer_rows,
             "large_signers": large_signers,
             "active_stalls": sorted(self.active_stalls),
+            "pre_commit_laggards": [
+                {"signer_address": address, "median_lateness_seconds": median,
+                 "samples": count}
+                for address, median, count in self._pre_commit_laggards(limit=10)
+            ],
+            "pre_commits_before_proposal_count": len(self.pre_commits_before_proposal),
+            "block_phases": list(self.block_phase_history)[-60:],
+            "phase_percentiles": self._phase_percentiles(),
+            "signer_phase_rows": self._signer_phase_rows(),
         }
 
     def _current_large_signers(self) -> List[Tuple[str, float]]:

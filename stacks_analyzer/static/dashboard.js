@@ -1960,6 +1960,172 @@
       document.getElementById("countsBody").innerHTML = counts.map((row) => {
         return "<tr><th>" + escapeHtml(row[0]) + "</th><td>" + escapeHtml(row[1]) + "</td></tr>";
       }).join("");
+
+      renderPhaseChart(data);
+      renderSignerPhases(data);
+    }
+
+    // Phases are consecutive and sum to each block's total, so they stack. A normal
+    // block is a 1-2s sliver; a stall is a tall bar whose fattest segment is the cause.
+    const PHASE_SEGMENTS = [
+      ["validate", "#38bdf8", "validate"],
+      ["precommit_wait", "#f59e0b", "wait for 70% pre-commit"],
+      ["to_first_accept", "#a78bfa", "to first acceptance"],
+      ["approval_gather", "#22c55e", "gather to 70% approval"]
+    ];
+    const PHASE_UNATTRIBUTED = ["#475569", "unattributed (log not present)"];
+
+    function formatSeconds(value) {
+      if (value === null || value === undefined) return "-";
+      const n = Number(value);
+      const sign = n < 0 ? "-" : "";
+      const abs = Math.abs(n);
+      if (abs < 1) return sign + (abs * 1000).toFixed(0) + "ms";
+      if (abs < 60) return sign + abs.toFixed(1) + "s";
+      return sign + Math.floor(abs / 60) + "m" + Math.round(abs % 60) + "s";
+    }
+
+    function renderPhaseChart(data) {
+      const svg = document.getElementById("phaseChart");
+      const meta = document.getElementById("phaseMeta");
+      if (!svg) return;
+
+      document.getElementById("phaseLegend").innerHTML = PHASE_SEGMENTS.map((seg) => {
+        return "<span class='phase-legend-item'><span class='phase-key' style='background:" +
+          seg[1] + "'></span>" + escapeHtml(seg[2]) + "</span>";
+      }).concat([
+        "<span class='phase-legend-item'><span class='phase-key' style='background:" +
+          PHASE_UNATTRIBUTED[0] + "'></span>" + escapeHtml(PHASE_UNATTRIBUTED[1]) + "</span>"
+      ]).join("");
+
+      const rows = (data.block_phases || []).slice(-60);
+      if (!rows.length) {
+        svg.innerHTML = "";
+        meta.textContent = "No completed blocks yet (needs the pre-commit signer log)";
+        renderPhasePercentiles(data);
+        return;
+      }
+
+      const rect = svg.getBoundingClientRect();
+      const width = Math.max(240, Math.round(rect.width || svg.clientWidth || 0));
+      const height = Math.max(120, Math.round(rect.height || svg.clientHeight || 0));
+      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+      svg.setAttribute("preserveAspectRatio", "xMinYMin meet");
+
+      const topPad = 8;
+      const bottomPad = 14;
+      const plotHeight = height - topPad - bottomPad;
+      const maxTotal = Math.max.apply(null, rows.map((r) => Number(r.total_seconds) || 0)) || 1;
+      const slot = width / rows.length;
+      const barWidth = Math.max(2, Math.min(18, slot - 2));
+
+      let markup = "";
+      rows.forEach((row, index) => {
+        const x = index * slot + (slot - barWidth) / 2;
+        let cursor = 0;
+        const heightLabel = (row.block_height === null || row.block_height === undefined)
+          ? "?" : row.block_height;
+        let tooltip = "height " + heightLabel + " total=" + formatSeconds(row.total_seconds);
+        let attributed = 0;
+        PHASE_SEGMENTS.forEach((seg) => {
+          const raw = row[seg[0]];
+          if (raw === null || raw === undefined) return;
+          const value = Number(raw);
+          attributed += value;
+          tooltip += " | " + seg[2] + "=" + formatSeconds(value);
+          const segHeight = (value / maxTotal) * plotHeight;
+          if (segHeight <= 0) return;
+          const y = topPad + plotHeight - cursor - segHeight;
+          markup += "<rect x='" + x.toFixed(1) + "' y='" + y.toFixed(1) +
+            "' width='" + barWidth.toFixed(1) + "' height='" + segHeight.toFixed(1) +
+            "' fill='" + seg[1] + "'></rect>";
+          cursor += segHeight;
+        });
+        // Milestones the current signer build does not log leave a hole between the
+        // segments and the block's real total. Draw it explicitly in neutral grey so
+        // bar heights stay comparable and unexplained time is visible rather than
+        // silently dropped.
+        const unattributed = Math.max(0, (Number(row.total_seconds) || 0) - attributed);
+        if (unattributed > 0.001) {
+          tooltip += " | unattributed=" + formatSeconds(unattributed);
+          const segHeight = (unattributed / maxTotal) * plotHeight;
+          if (segHeight > 0) {
+            const y = topPad + plotHeight - cursor - segHeight;
+            markup += "<rect x='" + x.toFixed(1) + "' y='" + y.toFixed(1) +
+              "' width='" + barWidth.toFixed(1) + "' height='" + segHeight.toFixed(1) +
+              "' fill='#475569'></rect>";
+            cursor += segHeight;
+          }
+        }
+        markup += "<rect x='" + x.toFixed(1) + "' y='" + topPad +
+          "' width='" + barWidth.toFixed(1) + "' height='" + plotHeight +
+          "' fill='transparent'><title>" + escapeHtml(tooltip) + "</title></rect>";
+      });
+      svg.innerHTML = markup;
+
+      const worst = rows.reduce((acc, row) =>
+        (Number(row.total_seconds) || 0) > (Number(acc.total_seconds) || 0) ? row : acc, rows[0]);
+      const worstHeight = (worst.block_height === null || worst.block_height === undefined)
+        ? "?" : worst.block_height;
+      meta.innerHTML = "<span>" + rows.length + " blocks</span><span>slowest: height " +
+        escapeHtml(String(worstHeight)) + " at " +
+        escapeHtml(formatSeconds(worst.total_seconds)) + "</span>";
+      renderPhasePercentiles(data);
+    }
+
+    const MILESTONE_LABELS = [
+      ["to_first_pre_commit", "proposal → 1st pre-commit"],
+      ["to_pre_commit_threshold", "proposal → 70% pre-commit"],
+      ["to_first_acceptance", "proposal → 1st acceptance"],
+      ["to_approval_threshold", "proposal → 70% approval"]
+    ];
+
+    function renderPhasePercentiles(data) {
+      const host = document.getElementById("phasePercentiles");
+      if (!host) return;
+      const pct = data.phase_percentiles || {};
+      host.innerHTML = MILESTONE_LABELS.map((entry) => {
+        const stats = pct[entry[0]];
+        const body = stats
+          ? "p50 " + escapeHtml(formatSeconds(stats.p50)) +
+            " &middot; p95 " + escapeHtml(formatSeconds(stats.p95)) +
+            " &middot; max " + escapeHtml(formatSeconds(stats.max))
+          : "<span class='muted'>no data</span>";
+        return "<div class='phase-pct'><div class='phase-pct-label'>" + escapeHtml(entry[1]) +
+          "</div><div class='phase-pct-value'>" + body + "</div></div>";
+      }).join("");
+    }
+
+    function renderSignerPhases(data) {
+      const body = document.getElementById("signerPhasesBody");
+      const meta = document.getElementById("signerPhasesMeta");
+      if (!body) return;
+      const rows = data.signer_phase_rows || [];
+      if (!rows.length) {
+        body.innerHTML = "<tr><td colspan='5' class='muted'>No per-signer phase samples yet.</td></tr>";
+        meta.textContent = "";
+        return;
+      }
+      body.innerHTML = rows.slice(0, 20).map((row) => {
+        const median = Number(row.median_seconds);
+        // Negative pre-commit lateness means that signer was ahead of us.
+        const cls = median < 0
+          ? "phase-ahead"
+          : median > 30 ? "phase-very-late" : median > 5 ? "phase-late" : "";
+        const label = row.name
+          ? escapeHtml(row.name)
+          : escapeHtml(String(row.identifier).slice(0, 16)) + "...";
+        const phase = row.kind === "pre_commit" ? "pre-commit lateness" : "acceptance reaction";
+        return "<tr><td class='mono'>" + label + "</td><td>" + escapeHtml(phase) +
+          "</td><td class='" + cls + "'>" + escapeHtml(formatSeconds(median)) +
+          "</td><td>" + escapeHtml(formatSeconds(row.worst_seconds)) +
+          "</td><td>" + (row.samples || 0) + "</td></tr>";
+      }).join("");
+      const ahead = rows.filter((row) =>
+        row.kind === "pre_commit" && Number(row.median_seconds) < 0).length;
+      meta.textContent = ahead
+        ? ahead + " signer(s) consistently ahead of this node — proposals are reaching us late"
+        : "pre-commit lateness measured from our proposal receipt; acceptance reaction from the 70% pre-commit crossing";
     }
 
     async function load() {
