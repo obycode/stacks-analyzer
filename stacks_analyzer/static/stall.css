@@ -1,0 +1,93 @@
+/* Stall diagnostics panel, shared by the dashboard and the report page. */
+.stall-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.stall-shape {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+.stall-head-meta {
+  font-size: 12px;
+}
+.stall-factors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.stall-factor {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.08);
+  padding: 3px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.stall-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.stall-tile {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(148, 163, 184, 0.06);
+  min-width: 0;
+}
+.stall-tile-warn { border-color: rgba(245, 158, 11, 0.55); background: rgba(245, 158, 11, 0.08); }
+.stall-tile-critical { border-color: rgba(239, 68, 68, 0.55); background: rgba(239, 68, 68, 0.08); }
+.stall-tile-ok { border-color: rgba(34, 197, 94, 0.55); background: rgba(34, 197, 94, 0.08); }
+.stall-tile-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.stall-tile-value {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.stall-tile-value .mono { font-size: 14px; }
+.stall-tile-note {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.35;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.stall-details { margin-top: 8px; }
+.stall-details summary {
+  cursor: pointer;
+  color: #bae6fd;
+  font-size: 12px;
+}
+.stall-details table { margin-top: 6px; font-size: 12px; }
+.stall-log { margin-top: 6px; max-height: 240px; overflow: auto; }
+.stall-log-row {
+  font-size: 11px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.stall-history { margin-top: 12px; font-size: 12px; }
+.stall-history-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-top: 14px;
+}
+@media (max-width: 700px) {
+  .stall-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stall-history th:nth-child(n+5), .stall-history td:nth-child(n+5) { display: none; }
+}

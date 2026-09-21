@@ -318,6 +318,7 @@ class MonitoringService:
     def _publish_alert(self, alert: Alert) -> None:
         snapshot: Optional[Dict[str, Any]] = None
         recent_rejections: Optional[list] = None
+        stall_diagnostics: Optional[Dict[str, Any]] = None
         with self.state_lock:
             self.recent_alerts.append(
                 {
@@ -330,6 +331,10 @@ class MonitoringService:
             if self.history_store is not None and alert.severity in ("warning", "critical"):
                 snapshot = self.detector.snapshot(now=alert.ts)
                 recent_rejections = list(self.detector.recent_rejections)
+                if self._is_stall_alert_key(alert.key):
+                    stall_diagnostics = self._copy_json(
+                        self.detector.stall_diagnostics_for_alert(alert.key)
+                    )
         rendered = "[ALERT][%s] %s" % (alert.severity.upper(), alert.message)
         print(rendered, flush=True)
         if self.history_store is not None:
@@ -360,6 +365,7 @@ class MonitoringService:
                     "recent_alerts": list(self.recent_alerts)[-20:],
                     "recent_rejections": recent_rejections,
                     "proposal_timeline": proposal_timeline,
+                    "stall_diagnostics": stall_diagnostics,
                 }
                 report_id = self.history_store.create_report(
                     ts=alert.ts,
@@ -392,6 +398,22 @@ class MonitoringService:
                 sent = self.notifier.send(rendered)
                 if sent and str(alert.severity).lower() == "critical":
                     self.telegram_critical_open_keys.add(alert.key)
+
+    @staticmethod
+    def _is_stall_alert_key(key: object) -> bool:
+        return isinstance(key, str) and key in (
+            "node-stall",
+            "signer-stall",
+            "node-stall-recovered",
+            "signer-stall-recovered",
+        )
+
+    @staticmethod
+    def _copy_json(value: object) -> Optional[Dict[str, Any]]:
+        """Detach a live detector dict so later ticks cannot mutate the report."""
+        if not isinstance(value, dict):
+            return None
+        return json.loads(json.dumps(value))
 
     def _history_api(self, params: Dict[str, list]) -> Dict[str, Any]:
         if self.history_store is None:
@@ -1080,6 +1102,11 @@ class MonitoringService:
         compact_recent_rejections = self._compact_recent_rejections_for_ai(
             report_data.get("recent_rejections")
         )
+        stall_diagnostics = (
+            report_data.get("stall_diagnostics")
+            if isinstance(report_data.get("stall_diagnostics"), dict)
+            else None
+        )
         incident = {
             "report_id": report.get("id"),
             "ts": report.get("ts"),
@@ -1115,6 +1142,7 @@ class MonitoringService:
                 "recent_events": compact_recent_events,
                 "recent_alerts": compact_recent_alerts,
                 "recent_rejections": compact_recent_rejections,
+                "stall_diagnostics": stall_diagnostics,
             },
             "log_window_seconds": {
                 "before": before,
@@ -1482,12 +1510,16 @@ class MonitoringService:
         elif key_text.startswith("node-stall"):
             title = "Node tip progression stalled"
             description = (
-                "The node did not advance to a new tip within the expected interval."
+                "The node did not advance to a new tip within the expected interval. "
+                "The stall diagnosis below says where in the tenure it happened, who "
+                "should have been mining, and what Bitcoin and the mempool were doing."
             )
         elif key_text.startswith("signer-stall"):
             title = "Signer proposal flow stalled"
             description = (
-                "No new signer proposal activity was seen within the expected interval."
+                "No new signer proposal activity was seen within the expected interval. "
+                "The stall diagnosis below says whether the miner stopped proposing or "
+                "this signer stopped receiving proposals."
             )
         elif key_text.startswith("burn-block-"):
             title = "New burn block observed"

@@ -68,6 +68,27 @@ class DetectorConfig:
     # proposal delivery is lagging the network.
     pre_commit_before_proposal_window_seconds: int = 120
     pre_commit_before_proposal_threshold: int = 5
+    # Two Bitcoin blocks this close together are a "flash block": the second
+    # sortition lands before the first one's winner has had time to get a block
+    # signed, so the first tenure ends with nothing in it.
+    flash_block_seconds: int = 60
+    # How many past stalls (with their diagnostics) the snapshot keeps.
+    stall_history_size: int = 50
+    # Diagnostics look this far back from the stall for reorgs, flash blocks and
+    # log warnings, and at least as far as the last Stacks block.
+    stall_lookback_seconds: int = 900
+
+
+STALL_SHAPE_LABELS = {
+    "idle_mempool": "Nothing to mine",
+    "tenure_start_no_block": "New tenure, no first block",
+    "tenure_start_proposal_stuck": "New tenure, first block stuck with signers",
+    "proposal_stuck": "Proposal stuck with signers",
+    "mid_tenure_after_burn_block": "Mid-tenure, burn block arrived, no block since",
+    "mid_tenure_silent": "Mid-tenure, miner went quiet",
+    "no_proposals_seen": "Signer has seen no proposals",
+    "unknown": "Not enough context",
+}
 
 
 @dataclass
@@ -288,6 +309,23 @@ class Detector:
         self.block_burn_height_order: Deque[str] = deque()
         self.burn_height_by_consensus_hash: Dict[str, int] = {}
         self.recent_burn_block_events: Deque[Tuple[float, int]] = deque(maxlen=32)
+        # (ts, highest common ancestor height) for each burnchain reorg the node logged.
+        self.recent_burnchain_reorgs: Deque[Tuple[float, int]] = deque(maxlen=32)
+        # ERROR/WARN lines from either process, minus p2p chatter, so a stall's
+        # diagnostics can show what the software was complaining about at the time.
+        self.recent_log_warnings: Deque[Dict[str, object]] = deque(maxlen=200)
+        # Last confirmed tip, kept separately from current_stacks_block_height
+        # (which any event, including an unconfirmed proposal, can raise).
+        self.last_node_tip_height: Optional[int] = None
+        self.last_node_tip_consensus_hash: Optional[str] = None
+        self.last_signer_proposal_height: Optional[int] = None
+        self.last_signer_proposal_burn_height: Optional[int] = None
+        # Stall diagnostics: one entry per stall, created when the stall is first
+        # detected, refreshed each tick while it lasts, finalized on recovery.
+        self.active_stall_diagnostics: Dict[str, Dict[str, object]] = {}
+        self.stall_history: Deque[Dict[str, object]] = deque(
+            maxlen=self.config.stall_history_size
+        )
         self.recent_rejections: Deque[Dict[str, object]] = deque(maxlen=200)
         self.rejection_pattern_alerted: Set[str] = set()
 
@@ -375,6 +413,18 @@ class Detector:
                     self.block_interval_total_seconds += interval_seconds
                     self.block_interval_samples += 1
             self.last_node_tip_ts = event.ts
+            tip_header_hash = event.fields.get("block_header_hash")
+            tip_height = (
+                self.block_height_by_hash.get(tip_header_hash)
+                if isinstance(tip_header_hash, str)
+                else None
+            )
+            if not isinstance(tip_height, int):
+                tip_height = self.current_stacks_block_height
+            self.last_node_tip_height = tip_height
+            tip_consensus = event.fields.get("consensus_hash")
+            if isinstance(tip_consensus, str) and tip_consensus:
+                self.last_node_tip_consensus_hash = tip_consensus
             self._record_tenure_block_count(
                 consensus_hash=event.fields.get("consensus_hash")
                 if isinstance(event.fields.get("consensus_hash"), str)
@@ -706,6 +756,7 @@ class Detector:
         elif event.kind == "node_burnchain_reorg":
             common_ancestor_height = event.fields.get("common_ancestor_height")
             if isinstance(common_ancestor_height, int):
+                self.recent_burnchain_reorgs.append((event.ts, common_ancestor_height))
                 message = (
                     "Burnchain reorg detected: highest common ancestor at height %d"
                     % common_ancestor_height
@@ -828,8 +879,17 @@ class Detector:
                 self.active_miner_burn_height = burn_height
             self.active_miner_last_update_ts = event.ts
 
+        elif event.kind in ("node_error_or_warn", "signer_error_or_warn"):
+            self._record_log_warning(event)
+
         elif event.kind == "signer_block_proposal":
             self.last_signer_proposal_ts = event.ts
+            proposal_height = event.fields.get("block_height")
+            if isinstance(proposal_height, int):
+                self.last_signer_proposal_height = proposal_height
+            proposal_burn_height = event.fields.get("burn_height")
+            if isinstance(proposal_burn_height, int):
+                self.last_signer_proposal_burn_height = proposal_burn_height
             self._clear_stall("signer-stall", event.ts, alerts)
 
             signature_hash = event.fields.get("signer_signature_hash")
@@ -1407,10 +1467,17 @@ class Detector:
                         "No new node tip for %.0fs (threshold=%ds) | mempool_ready_txs=0"
                         % (node_gap, self.config.node_stall_seconds)
                     )
+                diagnostics = self._note_stall(
+                    key="node-stall",
+                    ts=ts,
+                    gap_seconds=node_gap,
+                    threshold_seconds=self.config.node_stall_seconds,
+                    severity=severity,
+                )
                 self._emit_stall(
                     alerts=alerts,
                     key="node-stall",
-                    message=message,
+                    message=message + self._stall_message_suffix(diagnostics),
                     ts=ts,
                     severity=severity,
                 )
@@ -1418,14 +1485,659 @@ class Detector:
         if self.last_signer_proposal_ts is not None:
             signer_gap = ts - self.last_signer_proposal_ts
             if signer_gap > self.config.signer_stall_seconds:
+                diagnostics = self._note_stall(
+                    key="signer-stall",
+                    ts=ts,
+                    gap_seconds=signer_gap,
+                    threshold_seconds=self.config.signer_stall_seconds,
+                    severity="critical",
+                )
                 self._emit_stall(
                     alerts=alerts,
                     key="signer-stall",
-                    message="No signer block proposal for %.0fs (threshold=%ds)"
-                    % (signer_gap, self.config.signer_stall_seconds),
+                    message=(
+                        "No signer block proposal for %.0fs (threshold=%ds)"
+                        % (signer_gap, self.config.signer_stall_seconds)
+                    )
+                    + self._stall_message_suffix(diagnostics),
                     ts=ts,
                     severity="critical",
                 )
+
+    # ------------------------------------------------------------------
+    # Stall diagnostics
+    #
+    # A stall alert on its own says only "no block for N seconds". The shape
+    # of the stall is what tells an operator where to look: whether a freshly
+    # elected miner never produced its first block, whether a miner went quiet
+    # mid-tenure, whether a proposal is sitting with the signers, and whether
+    # Bitcoin did something unusual (reorg, flash block) just beforehand.
+    # ------------------------------------------------------------------
+
+    def _note_stall(
+        self,
+        key: str,
+        ts: float,
+        gap_seconds: float,
+        threshold_seconds: int,
+        severity: str,
+    ) -> Optional[Dict[str, object]]:
+        """Create or refresh the diagnostics entry for an ongoing stall."""
+        if self.suppress_alerts:
+            return None
+        entry = self.active_stall_diagnostics.get(key)
+        fresh = self._build_stall_diagnostics(
+            key=key,
+            ts=ts,
+            gap_seconds=gap_seconds,
+            threshold_seconds=threshold_seconds,
+            severity=severity,
+        )
+        if entry is None:
+            self.active_stall_diagnostics[key] = fresh
+            self.stall_history.append(fresh)
+            return fresh
+        # What was true when the stall began stays put; the rest tracks the
+        # present so a stall that changes character mid-way (a proposal shows
+        # up, a new burn block lands, the miner changes) is described as such.
+        preserved = {
+            "detected_ts": entry.get("detected_ts"),
+            "stalled_since_ts": entry.get("stalled_since_ts"),
+            "stacks": entry.get("stacks"),
+            "miner_at_detection": entry.get("miner_at_detection"),
+            "shape_at_detection": entry.get("shape_at_detection"),
+        }
+        entry.update(fresh)
+        entry.update(preserved)
+        miner_then = (preserved.get("miner_at_detection") or {}).get(
+            "expected_apparent_sender"
+        )
+        miner_now = (entry.get("miner") or {}).get("expected_apparent_sender")
+        if miner_then and miner_now and miner_then != miner_now:
+            entry["factors"] = list(entry.get("factors") or []) + [
+                "Expected miner changed during the stall: %s -> %s"
+                % (miner_then, miner_now)
+            ]
+        return entry
+
+    def _finalize_stall(
+        self, key: str, ts: float
+    ) -> Optional[Dict[str, object]]:
+        entry = self.active_stall_diagnostics.pop(key, None)
+        if entry is None:
+            return None
+        stalled_since = entry.get("stalled_since_ts")
+        entry["active"] = False
+        entry["recovered_ts"] = ts
+        entry["last_seen_ts"] = ts
+        entry["duration_seconds"] = (
+            max(0.0, ts - float(stalled_since))
+            if isinstance(stalled_since, (int, float))
+            else None
+        )
+        if key == "signer-stall":
+            entry["recovered_height"] = self.last_signer_proposal_height
+        else:
+            entry["recovered_height"] = self.last_node_tip_height
+        return entry
+
+    @staticmethod
+    def _stall_message_suffix(diagnostics: Optional[Dict[str, object]]) -> str:
+        if not isinstance(diagnostics, dict):
+            return ""
+        stacks = diagnostics.get("stacks") or {}
+        bitcoin = diagnostics.get("bitcoin") or {}
+        tenure = diagnostics.get("tenure") or {}
+        miner = diagnostics.get("miner") or {}
+        mempool = diagnostics.get("mempool") or {}
+        parts = ["shape=%s" % diagnostics.get("shape", "unknown")]
+        position = tenure.get("position")
+        if position:
+            parts.append("tenure=%s" % position)
+        sender = miner.get("expected_apparent_sender")
+        if sender:
+            parts.append(
+                "miner=%s (burn %s)"
+                % (sender, miner.get("expected_burn_height", "n/a"))
+            )
+        if stacks.get("last_confirmed_height") is not None:
+            parts.append("last_block=%s" % stacks.get("last_confirmed_height"))
+        if bitcoin.get("height") is not None:
+            parts.append("btc=%s" % bitcoin.get("height"))
+        if mempool.get("ready_txs") is not None:
+            parts.append("mempool_ready=%s" % mempool.get("ready_txs"))
+        if isinstance(bitcoin.get("reorg"), dict):
+            parts.append("reorg=yes")
+        flash = bitcoin.get("flash_block")
+        if isinstance(flash, dict) and flash.get("seen"):
+            parts.append("flash_block=yes")
+        return " | " + " | ".join(parts)
+
+    def _record_log_warning(self, event: ParsedEvent) -> None:
+        line = event.line or ""
+        if "p2p:" in line:
+            return
+        level = "ERROR" if " ERROR " in line else "WARN"
+        marker = " %s " % level
+        index = line.find(marker)
+        text = line[index + 1 :] if index >= 0 else line
+        if len(text) > 400:
+            text = text[:400] + "...[truncated]"
+        self.recent_log_warnings.append(
+            {
+                "ts": event.ts,
+                "source": event.source,
+                "level": level,
+                "line": text,
+            }
+        )
+
+    def _build_stall_diagnostics(
+        self,
+        key: str,
+        ts: float,
+        gap_seconds: float,
+        threshold_seconds: int,
+        severity: str,
+    ) -> Dict[str, object]:
+        def age(value: Optional[float]) -> Optional[float]:
+            if not isinstance(value, (int, float)):
+                return None
+            return max(0.0, ts - float(value))
+
+        lookback = max(float(self.config.stall_lookback_seconds), gap_seconds + 60.0)
+        window_start = ts - lookback
+        stalled_since = ts - gap_seconds
+        last_tip_ts = self.last_node_tip_ts
+
+        # -- Stacks: the last thing that happened before the stall -------------
+        stacks: Dict[str, object] = {
+            "last_confirmed_height": self.last_node_tip_height,
+            "last_confirmed_ts": last_tip_ts,
+            "last_confirmed_age_seconds": age(last_tip_ts),
+            "last_confirmed_consensus_hash": self.last_node_tip_consensus_hash,
+            "highest_height_seen": self.current_stacks_block_height,
+            "last_proposal_height": self.last_signer_proposal_height,
+            "last_proposal_burn_height": self.last_signer_proposal_burn_height,
+            "last_proposal_ts": self.last_signer_proposal_ts,
+            "last_proposal_age_seconds": age(self.last_signer_proposal_ts),
+        }
+
+        # -- Bitcoin: what the burnchain did around the stall -------------------
+        burn_events = sorted(self.recent_burn_block_events, key=lambda item: (item[1], item[0]))
+        last_burn = burn_events[-1] if burn_events else None
+        last_interval: Optional[float] = None
+        if len(burn_events) >= 2:
+            last_interval = max(0.0, burn_events[-1][0] - burn_events[-2][0])
+        flash_pairs: List[Dict[str, object]] = []
+        for previous, current in zip(burn_events, burn_events[1:]):
+            interval = current[0] - previous[0]
+            if current[0] < window_start:
+                continue
+            if 0 <= interval <= self.config.flash_block_seconds:
+                flash_pairs.append(
+                    {
+                        "from_height": previous[1],
+                        "to_height": current[1],
+                        "interval_seconds": interval,
+                        "ts": current[0],
+                    }
+                )
+        since_block: List[Dict[str, object]] = []
+        for burn_ts, burn_height in burn_events:
+            if last_tip_ts is not None and burn_ts <= last_tip_ts:
+                continue
+            round_state = self.sortition_rounds.get(burn_height)
+            since_block.append(
+                {
+                    "burn_height": burn_height,
+                    "ts": burn_ts,
+                    "outcome": (
+                        self._burn_round_outcome(round_state)
+                        if round_state is not None
+                        else None
+                    ),
+                    "winner_apparent_sender": (
+                        self._winner_apparent_sender(round_state)
+                        if round_state is not None
+                        else None
+                    ),
+                    "commit_count": len(round_state.commits) if round_state else 0,
+                    "null_reason": (
+                        round_state.null_miner_reason if round_state is not None else None
+                    ),
+                }
+            )
+        reorgs = [
+            (reorg_ts, height)
+            for reorg_ts, height in self.recent_burnchain_reorgs
+            if reorg_ts >= window_start
+        ]
+        reorg: Optional[Dict[str, object]] = None
+        if reorgs:
+            reorg = {
+                "ts": reorgs[-1][0],
+                "common_ancestor_height": reorgs[-1][1],
+                "age_seconds": age(reorgs[-1][0]),
+                "count": len(reorgs),
+                "before_stall": reorgs[-1][0] <= stalled_since,
+            }
+        bitcoin: Dict[str, object] = {
+            "height": self.current_bitcoin_block_height,
+            "last_burn_block_height": last_burn[1] if last_burn else None,
+            "last_burn_block_ts": last_burn[0] if last_burn else None,
+            "last_burn_block_age_seconds": age(last_burn[0]) if last_burn else None,
+            "last_burn_interval_seconds": last_interval,
+            "burn_blocks_since_last_stacks_block": since_block,
+            "reorg": reorg,
+            "flash_block": {
+                "seen": bool(flash_pairs),
+                "threshold_seconds": self.config.flash_block_seconds,
+                "pairs": flash_pairs[-5:],
+            },
+        }
+
+        # -- Tenure: where in a tenure the stall sits ----------------------------
+        winner_round = self._latest_successful_sortition_round()
+        winner_ts = winner_round.winner_ts if winner_round is not None else None
+        tenure_row = self.tenure_block_counts[-1] if self.tenure_block_counts else None
+        previous_row = (
+            self.tenure_block_counts[-2] if len(self.tenure_block_counts) >= 2 else None
+        )
+        if winner_ts is not None and (last_tip_ts is None or winner_ts > last_tip_ts):
+            position = "tenure_start"
+        elif last_tip_ts is not None:
+            position = "mid_tenure"
+        else:
+            position = "unknown"
+        if position == "tenure_start":
+            blocks_in_tenure: Optional[int] = 0
+            tenure_started_ts: Optional[float] = winner_ts
+            tenure_consensus = next(
+                (
+                    consensus
+                    for consensus, height in self.burn_height_by_consensus_hash.items()
+                    if winner_round is not None and height == winner_round.burn_height
+                ),
+                None,
+            )
+        else:
+            blocks_in_tenure = (
+                tenure_row.get("block_count") if isinstance(tenure_row, dict) else None
+            )
+            tenure_started_ts = (
+                tenure_row.get("start_ts") if isinstance(tenure_row, dict) else winner_ts
+            )
+            tenure_consensus = (
+                tenure_row.get("consensus_hash") if isinstance(tenure_row, dict) else None
+            )
+        extend_aggregate = self._extend_aggregate()
+        agg_extend_ts = extend_aggregate.get("agg_extend_ts")
+        extend_overdue: Optional[float] = None
+        if isinstance(agg_extend_ts, int) and agg_extend_ts <= ts:
+            extend_overdue = ts - agg_extend_ts
+        tenure: Dict[str, object] = {
+            "position": position,
+            "consensus_hash": tenure_consensus,
+            "burn_height": (
+                winner_round.burn_height if winner_round is not None else None
+            ),
+            "blocks_in_tenure": blocks_in_tenure,
+            "started_ts": tenure_started_ts,
+            "age_seconds": age(tenure_started_ts),
+            "previous_tenure_blocks": (
+                previous_row.get("block_count")
+                if isinstance(previous_row, dict) and position != "tenure_start"
+                else (
+                    tenure_row.get("block_count")
+                    if isinstance(tenure_row, dict) and position == "tenure_start"
+                    else None
+                )
+            ),
+            "last_extend": (
+                None
+                if self.last_tenure_extend_ts is None
+                else {
+                    "kind": self.last_tenure_extend_kind,
+                    "ts": self.last_tenure_extend_ts,
+                    "age_seconds": age(self.last_tenure_extend_ts),
+                    "after_last_block": (
+                        last_tip_ts is None or self.last_tenure_extend_ts >= last_tip_ts
+                    ),
+                }
+            ),
+            "extend_eligible_ts": agg_extend_ts,
+            "extend_overdue_seconds": extend_overdue,
+        }
+
+        # -- Miner: who should have been producing blocks -------------------------
+        latest_round = (
+            self.sortition_rounds.get(self.sortition_round_order[-1])
+            if self.sortition_round_order
+            else None
+        )
+        miner: Dict[str, object] = {
+            "expected_apparent_sender": (
+                self._winner_apparent_sender(winner_round) if winner_round else None
+            ),
+            "expected_burn_height": (
+                winner_round.burn_height if winner_round is not None else None
+            ),
+            "expected_winner_txid": (
+                winner_round.winner_txid if winner_round is not None else None
+            ),
+            "expected_stacks_block_hash": (
+                winner_round.winner_stacks_block_hash if winner_round is not None else None
+            ),
+            "sortition_ts": winner_ts,
+            "sortition_age_seconds": age(winner_ts),
+            "miner_pubkey": self.current_miner_pubkey,
+            "latest_sortition_burn_height": (
+                latest_round.burn_height if latest_round is not None else None
+            ),
+            "latest_sortition_outcome": (
+                self._burn_round_outcome(latest_round) if latest_round is not None else None
+            ),
+            "latest_sortition_null_reason": (
+                latest_round.null_miner_reason if latest_round is not None else None
+            ),
+            "latest_sortition_commit_count": (
+                len(latest_round.commits) if latest_round is not None else 0
+            ),
+            "signer_view_pkh": self.active_miner_pkh,
+            "signer_view_tenure_id": self.active_miner_tenure_id,
+            "signer_view_burn_height": self.active_miner_burn_height,
+            "signer_view_parent_last_block_height": (
+                self.active_miner_parent_last_block_height
+            ),
+            "signer_view_age_seconds": age(self.active_miner_last_update_ts),
+        }
+
+        # -- Mempool: was there anything to mine? -----------------------------------
+        max_considered: Optional[int] = None
+        for row in self.mempool_iteration_history:
+            row_ts = row.get("ts")
+            considered = row.get("considered_txs")
+            if not isinstance(row_ts, (int, float)) or row_ts < window_start:
+                continue
+            if isinstance(considered, int):
+                max_considered = (
+                    considered if max_considered is None else max(max_considered, considered)
+                )
+        mempool: Dict[str, object] = {
+            "ready_txs": self.last_mempool_ready_txs,
+            "ready_sampled_ts": self.last_mempool_ready_ts,
+            "ready_age_seconds": age(self.last_mempool_ready_ts),
+            "stop_reason": self.last_mempool_stop_reason,
+            "last_iteration_ts": self.last_mempool_ts,
+            "last_iteration_age_seconds": age(self.last_mempool_ts),
+            "max_considered_in_window": max_considered,
+            "had_ready_txs": (
+                None
+                if self.last_mempool_ready_txs is None
+                else self.last_mempool_ready_txs > 0
+            ),
+            "empty_recent": self._mempool_empty_recent(ts),
+        }
+
+        # -- Proposals: is the miner proposing, and are signers answering? ----------
+        last_height = self.last_node_tip_height
+        open_rows: List[Dict[str, object]] = []
+        for signature_hash, state in self.proposals.items():
+            if (
+                isinstance(last_height, int)
+                and isinstance(state.block_height, int)
+                and state.block_height <= last_height
+            ):
+                # Already superseded by a confirmed block; it is not what is stuck.
+                continue
+            if state.start_ts > ts + 1.0:
+                # Replaying files: the signer log can run ahead of the node log,
+                # so this proposal is from after the stall being described.
+                continue
+            open_rows.append(
+                {
+                    "signature_hash": signature_hash,
+                    "block_height": state.block_height,
+                    "age_seconds": max(0.0, ts - state.start_ts),
+                    "phase": self._proposal_phase(state, ts),
+                    "max_percent_observed": state.max_percent,
+                    "max_reject_percent": state.max_reject_percent,
+                    "reject_reasons": sorted(state.reject_reasons),
+                    "pre_commit_weight": state.max_pre_commit_weight or None,
+                    "pre_commit_weight_required": state.pre_commit_weight_required,
+                    "accept_signers": len(state.signers),
+                    "reject_signers": len(state.reject_signers),
+                }
+            )
+        open_rows.sort(key=lambda row: float(row["age_seconds"]), reverse=True)
+        rejections: List[Dict[str, object]] = []
+        for entry in reversed(self.recent_rejections):
+            entry_ts = entry.get("ts")
+            if not isinstance(entry_ts, (int, float)) or entry_ts < window_start:
+                continue
+            rejections.append(
+                {
+                    "ts": entry_ts,
+                    "signature_hash": entry.get("signature_hash"),
+                    "block_height": entry.get("block_height"),
+                    "reject_reason": entry.get("reject_reason"),
+                    "max_reject_percent": entry.get("max_reject_percent"),
+                }
+            )
+            if len(rejections) >= 5:
+                break
+        proposals: Dict[str, object] = {
+            "open_count": len(open_rows),
+            "open": open_rows[:10],
+            "recent_rejections": rejections,
+            "pre_commits_before_proposal": len(self.pre_commits_before_proposal),
+            "last_validation_ms": self.last_signer_validation_ms,
+            "last_validation_age_seconds": age(self.last_signer_validation_ts),
+        }
+
+        warnings_start = min(window_start, stalled_since - 30.0)
+        log_warnings = [
+            dict(row)
+            for row in self.recent_log_warnings
+            if isinstance(row.get("ts"), (int, float)) and row["ts"] >= warnings_start
+        ][-12:]
+
+        entry: Dict[str, object] = {
+            "key": key,
+            "kind": "signer" if key == "signer-stall" else "node",
+            "severity": severity,
+            "active": True,
+            "detected_ts": ts,
+            "last_seen_ts": ts,
+            "stalled_since_ts": stalled_since,
+            "gap_seconds": gap_seconds,
+            "threshold_seconds": threshold_seconds,
+            "recovered_ts": None,
+            "duration_seconds": None,
+            "recovered_height": None,
+            "stacks": stacks,
+            "bitcoin": bitcoin,
+            "tenure": tenure,
+            "miner": miner,
+            "miner_at_detection": dict(miner),
+            "mempool": mempool,
+            "proposals": proposals,
+            "log_warnings": log_warnings,
+        }
+        shape, factors = self._classify_stall(entry)
+        entry["shape"] = shape
+        entry["shape_label"] = STALL_SHAPE_LABELS.get(shape, shape)
+        entry["shape_at_detection"] = shape
+        entry["factors"] = factors
+        return entry
+
+    def _classify_stall(
+        self, entry: Dict[str, object]
+    ) -> Tuple[str, List[str]]:
+        """Name the stall's primary shape and list the contributing factors."""
+        kind = entry.get("kind")
+        bitcoin = entry.get("bitcoin") or {}
+        tenure = entry.get("tenure") or {}
+        miner = entry.get("miner") or {}
+        mempool = entry.get("mempool") or {}
+        proposals = entry.get("proposals") or {}
+        factors: List[str] = []
+
+        def fmt_seconds(value: object) -> str:
+            if not isinstance(value, (int, float)):
+                return "?"
+            seconds = int(round(float(value)))
+            if seconds < 60:
+                return "%ds" % seconds
+            return "%dm %02ds" % (seconds // 60, seconds % 60)
+
+        since_block = bitcoin.get("burn_blocks_since_last_stacks_block") or []
+        open_rows = proposals.get("open") or []
+        position = tenure.get("position")
+
+        if mempool.get("empty_recent"):
+            shape = "idle_mempool"
+        elif kind == "signer" and self.last_signer_proposal_ts is None:
+            shape = "no_proposals_seen"
+        elif open_rows and position == "tenure_start":
+            shape = "tenure_start_proposal_stuck"
+        elif open_rows:
+            shape = "proposal_stuck"
+        elif position == "tenure_start":
+            shape = "tenure_start_no_block"
+        elif position == "mid_tenure" and since_block:
+            shape = "mid_tenure_after_burn_block"
+        elif position == "mid_tenure":
+            shape = "mid_tenure_silent"
+        else:
+            shape = "unknown"
+
+        reorg = bitcoin.get("reorg")
+        if isinstance(reorg, dict):
+            factors.append(
+                "Bitcoin reorg %s before detection (common ancestor %s)"
+                % (fmt_seconds(reorg.get("age_seconds")), reorg.get("common_ancestor_height"))
+            )
+        flash = bitcoin.get("flash_block") or {}
+        for pair in flash.get("pairs") or []:
+            factors.append(
+                "Flash block: Bitcoin %s -> %s arrived %s apart"
+                % (
+                    pair.get("from_height"),
+                    pair.get("to_height"),
+                    fmt_seconds(pair.get("interval_seconds")),
+                )
+            )
+        if position == "tenure_start":
+            factors.append(
+                "New miner %s won burn %s %s ago and has produced no block"
+                % (
+                    miner.get("expected_apparent_sender") or "?",
+                    miner.get("expected_burn_height"),
+                    fmt_seconds(miner.get("sortition_age_seconds")),
+                )
+            )
+        if since_block:
+            outcomes = ", ".join(
+                "%s=%s" % (row.get("burn_height"), row.get("outcome") or "?")
+                for row in since_block
+            )
+            factors.append(
+                "%d burn block(s) since the last Stacks block: %s"
+                % (len(since_block), outcomes)
+            )
+            if position == "mid_tenure" and all(
+                row.get("outcome") != BURN_OUTCOME_WINNER for row in since_block
+            ):
+                factors.append(
+                    "No new sortition winner, so %s should have extended its tenure"
+                    % (miner.get("expected_apparent_sender") or "the incumbent miner")
+                )
+        previous_blocks = tenure.get("previous_tenure_blocks")
+        if position == "tenure_start" and previous_blocks == 0:
+            factors.append("The previous tenure also produced no blocks")
+        overdue = tenure.get("extend_overdue_seconds")
+        last_extend = tenure.get("last_extend") or {}
+        if isinstance(overdue, (int, float)) and overdue > 0 and not last_extend.get(
+            "after_last_block"
+        ):
+            factors.append(
+                "Network was willing to accept a tenure extend %s ago; none confirmed"
+                % fmt_seconds(overdue)
+            )
+        ready = mempool.get("ready_txs")
+        if isinstance(ready, int):
+            if ready > 0:
+                factors.append(
+                    "Mempool had %d ready tx(s) at its last sample %s ago"
+                    % (ready, fmt_seconds(mempool.get("ready_age_seconds")))
+                )
+            else:
+                factors.append(
+                    "Mempool reported 0 ready txs %s ago"
+                    % fmt_seconds(mempool.get("ready_age_seconds"))
+                )
+        max_considered = mempool.get("max_considered_in_window")
+        if isinstance(max_considered, int) and max_considered > 0 and ready == 0:
+            factors.append(
+                "Up to %d txs were considered earlier in the window" % max_considered
+            )
+        for row in open_rows[:3]:
+            factors.append(
+                "Open proposal at height %s for %s: %s"
+                % (
+                    row.get("block_height") if row.get("block_height") is not None else "?",
+                    fmt_seconds(row.get("age_seconds")),
+                    row.get("phase")
+                    or "validated locally, no pre-commit visibility on this signer build",
+                )
+            )
+        rejections = proposals.get("recent_rejections") or []
+        if rejections:
+            reasons: Dict[str, int] = {}
+            for row in rejections:
+                reason = row.get("reject_reason") or "unknown"
+                reasons[str(reason)] = reasons.get(str(reason), 0) + 1
+            top_reason = sorted(reasons.items(), key=lambda item: (-item[1], item[0]))[0][0]
+            factors.append(
+                "%d proposal rejection(s) in the window (top reason: %s)"
+                % (len(rejections), top_reason)
+            )
+        lagging = proposals.get("pre_commits_before_proposal")
+        if isinstance(lagging, int) and lagging > 0:
+            factors.append(
+                "%d pre-commit(s) arrived before their proposals: this node receives proposals late"
+                % lagging
+            )
+        signer_burn = miner.get("signer_view_burn_height")
+        expected_burn = miner.get("expected_burn_height")
+        if (
+            isinstance(signer_burn, int)
+            and isinstance(expected_burn, int)
+            and signer_burn < expected_burn
+        ):
+            factors.append(
+                "Signer's miner view is at burn %d, behind the sortition at burn %d"
+                % (signer_burn, expected_burn)
+            )
+        burn_age = bitcoin.get("last_burn_block_age_seconds")
+        if isinstance(burn_age, (int, float)) and burn_age > 1800:
+            factors.append("No Bitcoin block for %s" % fmt_seconds(burn_age))
+        warnings = entry.get("log_warnings") or []
+        if warnings:
+            by_source: Dict[str, int] = {}
+            for row in warnings:
+                source = str(row.get("source") or "?")
+                by_source[source] = by_source.get(source, 0) + 1
+            factors.append(
+                "%d warning/error line(s) in the window (%s)"
+                % (
+                    len(warnings),
+                    ", ".join("%s %d" % item for item in sorted(by_source.items())),
+                )
+            )
+        return shape, factors
 
     def _detect_mempool_empty(self, ts: float, alerts: List[Alert]) -> None:
         if self.last_mempool_stop_reason != "NoMoreCandidates":
@@ -3612,6 +4324,7 @@ class Detector:
             "signers": signer_rows,
             "large_signers": large_signers,
             "active_stalls": sorted(self.active_stalls),
+            "stall_diagnostics": self._stall_diagnostics_snapshot(),
             "pre_commit_laggards": [
                 {"signer_address": address, "median_lateness_seconds": median,
                  "samples": count}
@@ -3874,6 +4587,36 @@ class Detector:
         self.active_stalls.add(key)
         self._emit_alert(alerts, key=key, severity=severity, message=message, ts=ts)
 
+    def _stall_diagnostics_snapshot(self, limit: int = 20) -> Dict[str, object]:
+        active = sorted(
+            self.active_stall_diagnostics.values(),
+            key=lambda entry: float(entry.get("detected_ts") or 0.0),
+        )
+        recent = list(reversed(self.stall_history))[:limit]
+        return {
+            "active": active,
+            "recent": recent,
+            "flash_block_seconds": self.config.flash_block_seconds,
+            "lookback_seconds": self.config.stall_lookback_seconds,
+        }
+
+    def stall_diagnostics_for_alert(self, key: str) -> Optional[Dict[str, object]]:
+        """The diagnostics entry an alert with this key refers to, if any.
+
+        Recovery alerts use the base key with a ``-recovered`` suffix; those
+        resolve to the most recent finished stall of that kind.
+        """
+        if not isinstance(key, str):
+            return None
+        base = key[: -len("-recovered")] if key.endswith("-recovered") else key
+        active = self.active_stall_diagnostics.get(base)
+        if active is not None and base == key:
+            return active
+        for entry in reversed(self.stall_history):
+            if entry.get("key") == base:
+                return entry
+        return None
+
     def _mempool_empty_recent(self, ts: float) -> bool:
         if self.last_mempool_stop_reason != "NoMoreCandidates":
             return False
@@ -3887,13 +4630,27 @@ class Detector:
     def _clear_stall(self, key: str, ts: float, alerts: List[Alert]) -> None:
         if key in self.active_stalls:
             self.active_stalls.remove(key)
+            diagnostics = self._finalize_stall(key, ts)
+            message = "%s recovered" % key
+            if isinstance(diagnostics, dict):
+                duration = diagnostics.get("duration_seconds")
+                parts = []
+                if isinstance(duration, (int, float)):
+                    parts.append("after %.0fs" % duration)
+                parts.append("shape=%s" % diagnostics.get("shape", "unknown"))
+                recovered_height = diagnostics.get("recovered_height")
+                if recovered_height is not None:
+                    parts.append("height=%s" % recovered_height)
+                message = "%s recovered %s" % (key, " | ".join(parts))
             self._emit_alert(
                 alerts=alerts,
                 key="%s-recovered" % key,
                 severity="info",
-                message="%s recovered" % key,
+                message=message,
                 ts=ts,
             )
+        else:
+            self._finalize_stall(key, ts)
 
     def _emit_alert(
         self, alerts: List[Alert], key: str, severity: str, message: str, ts: float
@@ -3922,6 +4679,10 @@ class Detector:
             if state.threshold_ts is None:
                 state.start_ts = ts
         self.active_stalls.clear()
+        # Anything "detected" during replay was measured against replay time.
+        for entry in self.active_stall_diagnostics.values():
+            entry["active"] = False
+        self.active_stall_diagnostics.clear()
 
     def _set_current_consensus(
         self, consensus_hash: str, burn_height: Optional[int] = None

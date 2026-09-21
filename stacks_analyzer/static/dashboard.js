@@ -1606,6 +1606,50 @@
         : "";
     }
 
+    // Match a stall entry to the report written for its alert: same key, and
+    // the report was created on the tick that first detected the stall.
+    function stallReportUrl(diag, reports) {
+      if (!diag || !reports || !reports.length) return null;
+      const detected = Number(diag.detected_ts);
+      let best = null;
+      for (const report of reports) {
+        if (report.alert_key !== diag.key || !report.report_id) continue;
+        const delta = Math.abs(Number(report.ts) - detected);
+        if (delta <= 5 && (best === null || delta < best.delta)) best = { delta, id: report.report_id };
+      }
+      return best ? "/report?id=" + encodeURIComponent(best.id) : null;
+    }
+
+    function renderStallPanel(data) {
+      const body = document.getElementById("stallBody");
+      const meta = document.getElementById("stallMeta");
+      const history = document.getElementById("stallHistory");
+      if (!body || !window.StallView) return;
+      const diagnostics = data.stall_diagnostics || {};
+      const active = diagnostics.active || [];
+      const recent = diagnostics.recent || [];
+      const reports = data.recent_reports || [];
+      const card = document.getElementById("stallCard");
+      if (card) card.classList.toggle("card-stall-active", active.length > 0);
+      if (active.length) {
+        body.innerHTML = active
+          .map((diag) => StallView.render(diag, { reportUrl: stallReportUrl(diag, reports) }))
+          .join("<hr class='stall-sep'/>");
+        meta.textContent = active.length + " active";
+      } else if (recent.length) {
+        body.innerHTML = StallView.render(recent[0], { reportUrl: stallReportUrl(recent[0], reports) });
+        meta.textContent = "last stall";
+      } else {
+        body.innerHTML = "<span class='muted'>No stalls observed since start.</span>";
+        meta.textContent = "";
+      }
+      const older = active.length ? recent.filter((diag) => diag.active === false) : recent.slice(1);
+      history.innerHTML = older.length
+        ? "<div class='stall-history-title'>Earlier stalls</div>" +
+          StallView.historyTable(older.slice(0, 8), (diag) => stallReportUrl(diag, reports))
+        : "";
+    }
+
     function render(data) {
       const now = new Date();
       const nowEpoch = Date.now() / 1000;
@@ -1625,6 +1669,7 @@
       renderBlockStrip(data, nowEpoch);
       renderExtendEta(data, nowEpoch);
       renderBurnOutcomes(data);
+      renderStallPanel(data);
 
       seedBlockCadenceFromState(data);
       seedMempoolFromState(data);

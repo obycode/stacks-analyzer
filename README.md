@@ -147,6 +147,37 @@ Notes:
 - When replaying historical file logs (`--mode files --from-beginning`), timing checks run on replay time to avoid false timeout alerts from old timestamps.
 - Open proposals are now kept closed after a pushed block, even if additional late threshold/acceptance lines arrive for the same signature hash.
 
+## Stall Diagnostics
+
+Every node or signer stall gets a diagnostics entry describing the shape of
+the stall, built from what the logs had said up to that moment:
+
+- Where in the tenure it sits: start of a tenure (a new sortition winner has
+  produced no block) or mid-tenure (blocks so far, tenure age), plus any burn
+  blocks that arrived after the last Stacks block and their outcomes.
+- Who should have been mining: the latest sortition winner and the burn height
+  it won, alongside the signer's own view of the active miner.
+- The last confirmed Stacks block height and the Bitcoin height before the
+  stall, with how long before detection each was seen.
+- Whether the node logged a Bitcoin reorg, and whether two Bitcoin blocks
+  arrived within `flash_block_seconds` (default 60) of each other.
+- Whether the mempool had ready transactions at its last sample.
+- Open proposals and the pipeline phase each is stuck in, recent rejections,
+  pre-commits that arrived before their proposal, the last tenure extend and
+  whether the network was already willing to accept one.
+- ERROR/WARN lines from either process in the window (p2p chatter dropped).
+
+The entry is refreshed on every tick while the stall lasts and finalized on
+recovery with the duration and the height that resumed. It is shown in the
+dashboard's Stall Diagnostics card, on the report page for the stall's alert,
+in `/api/state` under `stall_diagnostics` (`active` and `recent`), in the AI
+package, and summarized in the stall alert text itself
+(`shape=... | tenure=... | miner=... | last_block=... | btc=... | mempool_ready=...`).
+
+Detector config: `flash_block_seconds`, `stall_history_size` (default 50),
+`stall_lookback_seconds` (default 900, how far back reorgs, flash blocks and
+warnings are collected).
+
 ## Output
 
 - Alerts are printed as: `[ALERT][SEVERITY] ...`

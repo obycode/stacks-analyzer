@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Stacks Analyzer Dashboard</title>
     <link rel="stylesheet" href="/static/dashboard.css" />
+    <link rel="stylesheet" href="/static/stall.css" />
 </head>
 <body>
   <div class="wrap">
@@ -45,6 +46,15 @@
       <div class="block-strip" id="blockStrip">
         <div class="strip-track" id="blockStripTrack"><span class="muted">Waiting for blocks...</span></div>
       </div>
+    </div>
+
+    <div class="card card-stall" id="stallCard">
+      <div class="panel-title panel-title-row">
+        <span>Stall Diagnostics</span>
+        <span class="extend-eta" id="stallMeta"></span>
+      </div>
+      <div id="stallBody"><span class="muted">No stalls observed since start.</span></div>
+      <div id="stallHistory"></div>
     </div>
 
     <div class="chart-grid">
@@ -202,6 +212,7 @@
     </div>
   </div>
 
+    <script src="/static/stall.js"></script>
     <script src="/static/dashboard.js"></script>
 </body>
 </html>

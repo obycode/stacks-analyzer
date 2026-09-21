@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Stacks Analyzer Report</title>
     <link rel="stylesheet" href="/static/report.css" />
+    <link rel="stylesheet" href="/static/stall.css" />
 </head>
 <body>
   <div class="wrap">
@@ -16,6 +17,7 @@
       <div class="card report-hero" id="summaryCard">
         <div class="muted">Loading report...</div>
       </div>
+      <div class="card report-section" id="stallCard" style="display:none"></div>
       <div class="card report-section" id="proposalTimelineCard"></div>
       <div class="report-columns">
         <div class="stack">
@@ -59,6 +61,7 @@
       </div>
     </div>
   </div>
+    <script src="/static/stall.js"></script>
     <script src="/static/report.js"></script>
 </body>
 </html>

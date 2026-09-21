@@ -177,6 +177,17 @@
         "</div>" +
         "</div>";
 
+      const stallDiagnostics = report.data && report.data.stall_diagnostics ? report.data.stall_diagnostics : null;
+      const stallCard = document.getElementById("stallCard");
+      if (stallDiagnostics && window.StallView) {
+        stallCard.style.display = "block";
+        stallCard.innerHTML =
+          "<div class='card-title'><h2>Stall Diagnosis</h2><span class='muted'>captured when the alert fired</span></div>" +
+          StallView.render(stallDiagnostics);
+      } else {
+        stallCard.style.display = "none";
+      }
+
       const proposalTimeline = report.data && report.data.proposal_timeline ? report.data.proposal_timeline : null;
       const timelineCard = document.getElementById("proposalTimelineCard");
       if (!proposalTimeline || !proposalTimeline.events || !proposalTimeline.events.length) {

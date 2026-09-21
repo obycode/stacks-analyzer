@@ -130,6 +130,21 @@ def build_service_config(raw: Optional[Dict[str, Any]]) -> ServiceConfig:
                 DetectorConfig.burn_block_boundary_window_seconds,
             )
         ),
+        flash_block_seconds=int(
+            detector_payload.get(
+                "flash_block_seconds", DetectorConfig.flash_block_seconds
+            )
+        ),
+        stall_history_size=int(
+            detector_payload.get(
+                "stall_history_size", DetectorConfig.stall_history_size
+            )
+        ),
+        stall_lookback_seconds=int(
+            detector_payload.get(
+                "stall_lookback_seconds", DetectorConfig.stall_lookback_seconds
+            )
+        ),
     )
 
     telegram_payload = payload.get("telegram", {})

@@ -708,6 +708,8 @@
       border-right: 1px dotted var(--line);
       cursor: default;
     }
+    .card-stall-active { border-color: rgba(239, 68, 68, 0.55); }
+    .stall-sep { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
     .panel-title-row {
       display: flex;
       justify-content: space-between;
