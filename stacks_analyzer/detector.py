@@ -263,6 +263,9 @@ class Detector:
         self.confirmed_block_keys: Set[str] = set()
         self.confirmed_block_key_order: Deque[str] = deque()
         self.execution_cost_history: Deque[Dict[str, object]] = deque(maxlen=720)
+        # Confirmed block records not yet persisted by the service. Filled by
+        # _apply_confirmed_execution_cost, emptied by drain_block_records().
+        self.block_record_outbox: Deque[Dict[str, object]] = deque()
         self.pending_execution_cost_by_block_hash: Dict[str, Dict[str, object]] = {}
         self.pending_execution_cost_order: Deque[str] = deque()
         self.applied_execution_cost_block_hashes: Set[str] = set()
@@ -521,6 +524,12 @@ class Detector:
                         tenure_changes=pending_tenure_changes,
                         costs=costs,
                         cost_percents=cost_percents,
+                        block_size=event.fields.get("block_size")
+                        if isinstance(event.fields.get("block_size"), int)
+                        else None,
+                        validation_time_ms=event.fields.get("validation_time_ms")
+                        if isinstance(event.fields.get("validation_time_ms"), int)
+                        else None,
                     )
 
         elif event.kind == "node_include_tx":
@@ -3676,6 +3685,8 @@ class Detector:
         costs: Dict[str, int],
         cost_percents: Dict[str, float],
         tenure_changes: Optional[List[Dict[str, object]]] = None,
+        block_size: Optional[int] = None,
+        validation_time_ms: Optional[int] = None,
     ) -> None:
         self.pending_execution_cost_by_block_hash[block_header_hash] = {
             "ts": ts,
@@ -3688,6 +3699,8 @@ class Detector:
             "costs": costs,
             "costs_percent": cost_percents,
             "tenure_changes": tenure_changes if isinstance(tenure_changes, list) else [],
+            "block_size": block_size,
+            "validation_time_ms": validation_time_ms,
         }
         self.pending_execution_cost_order.append(block_header_hash)
         while (
@@ -3743,11 +3756,6 @@ class Detector:
             if isinstance(pending.get("tx_count"), int)
             else None
         )
-        self.last_execution_cost_percent_full = (
-            pending.get("percent_full")
-            if isinstance(pending.get("percent_full"), int)
-            else None
-        )
         resolved_consensus_hash = (
             consensus_hash
             if isinstance(consensus_hash, str) and consensus_hash
@@ -3755,18 +3763,152 @@ class Detector:
             if isinstance(pending.get("consensus_hash"), str)
             else None
         )
-        self.execution_cost_history.append(
-            {
-                "ts": ts,
-                "block_height": self.last_execution_cost_block_height,
-                "tx_count": self.last_execution_cost_tx_count,
-                "percent_full": self.last_execution_cost_percent_full,
-                "consensus_hash": resolved_consensus_hash,
-                "costs": self.last_execution_costs,
-                "costs_percent": self.last_execution_costs_percent,
-            }
+        record = self._build_block_record(
+            ts=ts,
+            block_header_hash=block_header_hash,
+            consensus_hash=resolved_consensus_hash,
+            pending=pending,
+            costs=self.last_execution_costs,
+            cost_percents=self.last_execution_costs_percent,
+            previous=self.execution_cost_history[-1]
+            if self.execution_cost_history
+            else None,
         )
+        self.last_execution_cost_percent_full = record.get("percent_full")
+        self.execution_cost_history.append(record)
+        self.block_record_outbox.append(record)
         return pending
+
+    def _build_block_record(
+        self,
+        ts: float,
+        block_header_hash: str,
+        consensus_hash: Optional[str],
+        pending: Dict[str, object],
+        costs: Dict[str, int],
+        cost_percents: Dict[str, float],
+        previous: Optional[Dict[str, object]],
+    ) -> Dict[str, object]:
+        """Describe one confirmed block's budget usage.
+
+        The execution cost the node logs for a validated block is the tenure
+        budget consumed so far (this block included), not the block's own cost:
+        it climbs across a tenure and drops back when a tenure change or extend
+        resets the budget. `costs` keeps that cumulative reading, `percent_full`
+        is its largest dimension against the block limit (the same figure the
+        miner logs as percent_full), and `costs_delta` is what this block added
+        on its own - derived from the previous confirmed height when it is
+        known, with `budget_reset` marking a block that started a fresh budget.
+        """
+        block_height = (
+            pending.get("block_height")
+            if isinstance(pending.get("block_height"), int)
+            else None
+        )
+        percent_full: Optional[float] = None
+        if isinstance(pending.get("percent_full"), int):
+            percent_full = float(pending.get("percent_full"))
+        elif cost_percents:
+            percent_full = round(max(cost_percents.values()), 2)
+
+        # burn_height is the Bitcoin block whose sortition started this
+        # block's tenure (via the consensus hash); tip_burn_height is where the
+        # Bitcoin chain stood when the block was confirmed. They differ once a
+        # tenure has been extended across later Bitcoin blocks, and only the
+        # latter is known for tenures that began before the analyzer started.
+        burn_height: Optional[int] = None
+        if isinstance(consensus_hash, str) and consensus_hash:
+            mapped = self.burn_height_by_consensus_hash.get(consensus_hash)
+            if isinstance(mapped, int):
+                burn_height = mapped
+            elif (
+                consensus_hash == self.current_consensus_hash
+                and isinstance(self.current_consensus_burn_height, int)
+            ):
+                burn_height = self.current_consensus_burn_height
+        tip_burn_height = (
+            self.current_bitcoin_block_height
+            if isinstance(self.current_bitcoin_block_height, int)
+            else None
+        )
+
+        costs_delta: Optional[Dict[str, int]] = None
+        costs_delta_percent: Optional[Dict[str, float]] = None
+        budget_reset: Optional[bool] = None
+        prev_height = previous.get("block_height") if isinstance(previous, dict) else None
+        prev_costs = previous.get("costs") if isinstance(previous, dict) else None
+        if (
+            isinstance(block_height, int)
+            and isinstance(prev_height, int)
+            and prev_height == block_height - 1
+            and isinstance(prev_costs, dict)
+        ):
+            prev_consensus = previous.get("consensus_hash")
+            new_tenure = (
+                isinstance(prev_consensus, str)
+                and isinstance(consensus_hash, str)
+                and prev_consensus != consensus_hash
+            )
+            dropped = any(
+                isinstance(prev_costs.get(key), int) and value < prev_costs[key]
+                for key, value in costs.items()
+            )
+            budget_reset = bool(new_tenure or dropped)
+            if budget_reset:
+                costs_delta = dict(costs)
+            else:
+                costs_delta = {
+                    key: value - int(prev_costs.get(key) or 0)
+                    for key, value in costs.items()
+                }
+            costs_delta_percent = {}
+            for key, value in costs_delta.items():
+                limit = EXECUTION_COST_LIMITS.get(key)
+                if limit:
+                    costs_delta_percent[key] = max(
+                        0.0, min(100.0, (float(value) / float(limit)) * 100.0)
+                    )
+
+        return {
+            "ts": ts,
+            "block_height": block_height,
+            "burn_height": burn_height,
+            "tip_burn_height": tip_burn_height,
+            "consensus_hash": consensus_hash,
+            "block_header_hash": block_header_hash,
+            "tx_count": (
+                pending.get("tx_count")
+                if isinstance(pending.get("tx_count"), int)
+                else None
+            ),
+            "tx_fees_microstacks": (
+                pending.get("tx_fees_microstacks")
+                if isinstance(pending.get("tx_fees_microstacks"), int)
+                else None
+            ),
+            "block_size": (
+                pending.get("block_size")
+                if isinstance(pending.get("block_size"), int)
+                else None
+            ),
+            "validation_time_ms": (
+                pending.get("validation_time_ms")
+                if isinstance(pending.get("validation_time_ms"), int)
+                else None
+            ),
+            "percent_full": percent_full,
+            "budget_reset": budget_reset,
+            "costs": dict(costs),
+            "costs_percent": dict(cost_percents),
+            "costs_delta": costs_delta,
+            "costs_delta_percent": costs_delta_percent,
+        }
+
+    def drain_block_records(self) -> List[Dict[str, object]]:
+        """Hand over confirmed block records that have not been persisted yet."""
+        records = list(self.block_record_outbox)
+        self.block_record_outbox.clear()
+        return records
 
     def _commit_confirmed_tenure_changes(
         self,

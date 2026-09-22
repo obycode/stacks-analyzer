@@ -1,0 +1,148 @@
+/* Block fullness table, shared by the dashboard card and the /blocks page. */
+.bf-scroll {
+  overflow-x: auto;
+}
+.bf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 720px;
+}
+.bf-table th, .bf-table td {
+  text-align: left;
+  padding: 7px 6px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.bf-table th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+}
+.bf-table .bf-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.bf-row:hover td {
+  background: rgba(148, 163, 184, 0.06);
+}
+.bf-height .mono {
+  font-variant-numeric: tabular-nums;
+}
+.bf-ext {
+  font-size: 11px;
+  opacity: 0.55;
+}
+.bf-ext:hover {
+  opacity: 1;
+}
+.bf-tip {
+  font-size: 11px;
+}
+.bf-seen {
+  color: #cbd5e1;
+  font-size: 12px;
+}
+.bf-usage {
+  min-width: 190px;
+  width: 26%;
+}
+.bf-usage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bf-track {
+  flex: 1;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.bf-fill {
+  height: 100%;
+  border-radius: 999px;
+}
+.bf-pct {
+  min-width: 52px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+.bf-sub {
+  font-size: 10px;
+  line-height: 1.2;
+  margin-top: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.bf-dims {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 22px;
+}
+.bf-dim {
+  display: inline-block;
+  width: 7px;
+  height: 100%;
+  border-radius: 2px;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid var(--line);
+  position: relative;
+  overflow: hidden;
+}
+.bf-dim-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  border-radius: 2px 2px 0 0;
+}
+.bf-delta {
+  min-width: 90px;
+}
+.bf-delta-pct {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.bf-reset {
+  display: inline-block;
+  margin-top: 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.16);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+.bf-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.bf-legend .legend-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+@media (max-width: 720px) {
+  .bf-table {
+    min-width: 560px;
+    font-size: 12px;
+  }
+  .bf-usage {
+    min-width: 140px;
+  }
+}

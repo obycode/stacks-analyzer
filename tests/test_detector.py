@@ -418,7 +418,9 @@ class TestDetector(unittest.TestCase):
         snapshot = detector.snapshot(now=110.0)
         self.assertEqual(snapshot["latest_execution_cost_block_height"], 6398580)
         self.assertEqual(snapshot["latest_execution_cost_tx_count"], 4)
-        self.assertIsNone(snapshot["latest_execution_cost_percent_full"])
+        # Validated-block lines carry no percent_full; it is derived the way the
+        # miner derives it, as the largest dimension's share of the limit.
+        self.assertAlmostEqual(snapshot["latest_execution_cost_percent_full"], 83.41, places=2)
         self.assertAlmostEqual(
             snapshot["latest_execution_costs_percent"]["runtime"], 6.25933068, places=4
         )

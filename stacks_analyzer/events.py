@@ -275,6 +275,8 @@ class LogParser:
                 )
                 tx_count = extract_field(line, "tx_count")
                 tx_fees_microstacks = extract_field(line, "tx_fees_microstacks")
+                block_size = extract_field(line, "block_size")
+                validation_time_ms = extract_field(line, "validation_time_ms")
                 execution_cost = None
                 execution_cost_match = EXECUTION_COST_RE.search(line)
                 if execution_cost_match:
@@ -308,6 +310,8 @@ class LogParser:
                             ),
                             "is_validation_request": is_validation_request,
                             "is_validated": is_validated,
+                            "block_size": _opt_int(block_size),
+                            "validation_time_ms": _opt_int(validation_time_ms),
                             "signer_signature_hash": extract_field(
                                 line, "signer_signature_hash"
                             ),

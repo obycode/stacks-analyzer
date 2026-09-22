@@ -37,6 +37,7 @@ def build_handler(
         Callable[[Dict[str, list]], Dict[str, Any]]
     ] = None,
     sql_provider: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+    blocks_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
 ) -> type:
     class DashboardHandler(BaseHTTPRequestHandler):
         def _send_bytes(
@@ -218,6 +219,27 @@ def build_handler(
                     "text/html; charset=utf-8",
                 )
                 return
+            if parsed.path == "/api/blocks":
+                if blocks_provider is None:
+                    self._send_bytes(
+                        b"blocks disabled\n", "text/plain; charset=utf-8", status=404
+                    )
+                    return
+                params = parse_qs(parsed.query)
+                payload = json.dumps(blocks_provider(params), sort_keys=True).encode("utf-8")
+                self._send_bytes(payload, "application/json; charset=utf-8")
+                return
+            if parsed.path == "/blocks":
+                if blocks_provider is None:
+                    self._send_bytes(
+                        b"blocks disabled\n", "text/plain; charset=utf-8", status=404
+                    )
+                    return
+                self._send_bytes(
+                    _load_static_html("blocks.html").encode("utf-8"),
+                    "text/html; charset=utf-8",
+                )
+                return
             if parsed.path == "/healthz":
                 self._send_bytes(b"ok\n", "text/plain; charset=utf-8")
                 return
@@ -268,6 +290,7 @@ class DashboardServer:
             Callable[[Dict[str, list]], Dict[str, Any]]
         ] = None,
         sql_provider: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        blocks_provider: Optional[Callable[[Dict[str, list]], Dict[str, Any]]] = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -282,6 +305,7 @@ class DashboardServer:
         self.report_filtered_logs_provider = report_filtered_logs_provider
         self.report_ai_package_provider = report_ai_package_provider
         self.sql_provider = sql_provider
+        self.blocks_provider = blocks_provider
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -298,6 +322,7 @@ class DashboardServer:
             report_filtered_logs_provider=self.report_filtered_logs_provider,
             report_ai_package_provider=self.report_ai_package_provider,
             sql_provider=self.sql_provider,
+            blocks_provider=self.blocks_provider,
         )
         self._server = ThreadingHTTPServer((self.host, self.port), handler)
         self._thread = threading.Thread(

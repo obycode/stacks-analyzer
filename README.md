@@ -58,7 +58,10 @@ python3 -m stacks_analyzer \
 When enabled, the dashboard serves:
 
 - `GET /`: interactive UI
+- `GET /blocks`: block browser (fullness of recent blocks, lookup by Stacks or
+  Bitcoin height)
 - `GET /api/state`: raw JSON state
+- `GET /api/blocks`: confirmed blocks with budget usage (see Block Fullness)
 - `GET /healthz`: health probe
 - Recent proposals table (latest 5, with copyable signature hashes and in-progress/approved/rejected status highlighting).
 - Recent Blocks strip: each tenure bracket lists every Bitcoin block it covered
@@ -71,6 +74,12 @@ When enabled, the dashboard serves:
   amounts come from `burn_fee` on accepted block commits, the same source as the
   sortition cards; the rail falls back to commits per null win on node builds
   that omit the field.
+- Block Fullness card: the latest 12 confirmed blocks, one row each, with how
+  much of the tenure's execution budget had been used through that block (bar,
+  largest dimension), what the block itself added, five mini bars for the
+  individual dimensions (runtime, write length/count, read length/count), tx
+  count, fees, size, and a marker where the budget was reset by a tenure change
+  or extend. Hover a row for the full breakdown. See Block Fullness below.
 - Visual sortition view for the latest 3 burn heights.
 - Each burn-height card shows all captured block commits, the committed stacks block target, and winner highlighting (or null-miner outcome).
 - Tenure extends table shows the latest 5 extend events with extend kind, Stacks block height, burn height, and txid.
@@ -82,6 +91,39 @@ CLI flags:
 - `--web-enable`
 - `--web-host 127.0.0.1`
 - `--web-port 8787`
+
+## Block Fullness
+
+The node logs an execution cost for every block it validates
+(`Participant: validated anchored block ... execution_cost: {...}`). In
+Nakamoto that figure is the tenure budget consumed so far, this block included:
+it climbs across a tenure and drops back to the block's own cost when a tenure
+change or a tenure extend resets the budget. The analyzer records that reading
+for every block that goes on to advance the tip, together with:
+
+- `percent_full`: the largest dimension's share of the block limit, the same
+  figure the miner logs as `percent_full` on mined blocks.
+- `costs_delta`: what the block alone added, derived from the previous
+  confirmed height when it was observed (`null` otherwise), and `budget_reset`
+  when the block started a fresh budget.
+- `burn_height`: the Bitcoin block whose sortition started the tenure, and
+  `tip_burn_height`: the Bitcoin tip when the block was confirmed. These
+  differ once a tenure has been extended across later Bitcoin blocks, and only
+  the latter is known for tenures that began before the analyzer started.
+- tx count, fees, block size and validation time from the same log line.
+
+With history enabled, every record is stored in the `blocks` table of the
+history database and kept for `history.block_retention_days` (default 5,
+0 keeps them forever), independent of the 48h event retention. The `/blocks`
+page browses them newest first and looks up a single Stacks height or every
+block confirmed under a Bitcoin height (matched on either burn height above);
+the dashboard's Block Fullness card links each height there. Without history
+the page falls back to the in-memory window of the last 720 blocks.
+
+`GET /api/blocks` takes `height`, `burn_height`, `before`, `after` (Stacks
+heights) and `limit` (default 50, max 500) and returns
+`{"blocks": [...], "bounds": {...}, "query": {...}, "source": "history"|"memory",
+"execution_cost_limits": {...}}` with blocks newest first.
 
 ## Run As systemd Service
 

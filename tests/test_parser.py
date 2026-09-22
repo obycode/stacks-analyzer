@@ -606,6 +606,8 @@ class TestLogParser(unittest.TestCase):
         self.assertEqual(event.fields["block_height"], 6319924)
         self.assertEqual(event.fields["tx_count"], 1)
         self.assertEqual(event.fields["tx_fees_microstacks"], 180)
+        self.assertEqual(event.fields["block_size"], 180)
+        self.assertEqual(event.fields["validation_time_ms"], 46)
         self.assertTrue(event.fields["is_validated"])
         self.assertFalse(event.fields["is_validation_request"])
         self.assertEqual(event.fields["runtime"], 65074508)

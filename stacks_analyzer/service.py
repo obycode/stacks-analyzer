@@ -10,7 +10,7 @@ import re
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 from .config import ServiceConfig
-from .detector import Alert, Detector
+from .detector import EXECUTION_COST_LIMITS, Alert, Detector
 from .events import LogParser, extract_timestamp
 from .history import HistoryStore, should_store_event
 from .sources import spawn_source_threads
@@ -62,6 +62,7 @@ class MonitoringService:
             self.history_store = HistoryStore(
                 path=config.history.path,
                 retention_hours=config.history.retention_hours,
+                block_retention_days=config.history.block_retention_days,
             )
             self._hydrate_recent_reports()
 
@@ -89,6 +90,7 @@ class MonitoringService:
                 report_ai_package_provider=(
                     self._report_ai_package_api if self.history_store else None
                 ),
+                blocks_provider=self._blocks_api,
                 sql_provider=self._sql_api if self._sql_api_enabled() else None,
             )
 
@@ -282,7 +284,16 @@ class MonitoringService:
                     )
                 if event.kind in ("node_sortition_winner_selected", "node_sortition_winner_rejected"):
                     self._record_sortition_event(event)
+        self._persist_block_records()
         self._publish_alerts(alert_batch)
+
+    def _persist_block_records(self) -> None:
+        with self.state_lock:
+            records = self.detector.drain_block_records()
+        if self.history_store is None or not records:
+            return
+        for record in records:
+            self.history_store.record_block(record)
 
     def _run_periodic(self, force_report: bool = False) -> None:
         now = self._state_now()
@@ -429,6 +440,95 @@ class MonitoringService:
             limit=limit,
         )
         return {"events": events}
+
+    def _blocks_api(self, params: Dict[str, list]) -> Dict[str, Any]:
+        """Confirmed blocks with their budget usage, newest first.
+
+        Backed by the history database when it is enabled; otherwise served
+        from the detector's in-memory window so the page still works.
+        """
+        height = _int_query_param(params, "height")
+        burn_height = _int_query_param(params, "burn_height")
+        before_height = _int_query_param(params, "before")
+        after_height = _int_query_param(params, "after")
+        limit = max(1, min(500, _int_query_param(params, "limit", 50) or 50))
+        query = {
+            "height": height,
+            "burn_height": burn_height,
+            "before": before_height,
+            "after": after_height,
+            "limit": limit,
+        }
+        if self.history_store is not None:
+            blocks = self.history_store.query_blocks(
+                height=height,
+                burn_height=burn_height,
+                before_height=before_height,
+                after_height=after_height,
+                limit=limit,
+            )
+            bounds = self.history_store.block_bounds()
+            source = "history"
+        else:
+            with self.state_lock:
+                window = list(self.detector.execution_cost_history)
+            rows = []
+            for record in window:
+                block_height = record.get("block_height")
+                if height is not None and block_height != height:
+                    continue
+                if burn_height is not None and burn_height not in (
+                    record.get("burn_height"),
+                    record.get("tip_burn_height"),
+                ):
+                    continue
+                if before_height is not None and not (
+                    isinstance(block_height, int) and block_height < before_height
+                ):
+                    continue
+                if after_height is not None and not (
+                    isinstance(block_height, int) and block_height > after_height
+                ):
+                    continue
+                rows.append(record)
+            rows.sort(
+                key=lambda item: (
+                    item.get("block_height") if isinstance(item.get("block_height"), int) else -1,
+                    item.get("ts") or 0,
+                )
+            )
+            if after_height is not None and before_height is None:
+                rows = rows[:limit]
+            else:
+                rows = rows[-limit:]
+            blocks = list(reversed(rows))
+            heights = [
+                r.get("block_height") for r in window if isinstance(r.get("block_height"), int)
+            ]
+            burns = [
+                value
+                for r in window
+                for value in (r.get("burn_height"), r.get("tip_burn_height"))
+                if isinstance(value, int)
+            ]
+            stamps = [r.get("ts") for r in window if isinstance(r.get("ts"), (int, float))]
+            bounds = {
+                "count": len(window),
+                "min_height": min(heights) if heights else None,
+                "max_height": max(heights) if heights else None,
+                "min_burn_height": min(burns) if burns else None,
+                "max_burn_height": max(burns) if burns else None,
+                "min_ts": min(stamps) if stamps else None,
+                "max_ts": max(stamps) if stamps else None,
+            }
+            source = "memory"
+        return {
+            "blocks": blocks,
+            "bounds": bounds,
+            "query": query,
+            "source": source,
+            "execution_cost_limits": dict(EXECUTION_COST_LIMITS),
+        }
 
     def _history_window_api(self, params: Dict[str, list]) -> Dict[str, Any]:
         if self.history_store is None:

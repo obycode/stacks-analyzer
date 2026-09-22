@@ -1582,6 +1582,42 @@
 
     // Countdown until signers will accept the next tenure extend, from the
     // eligibility timestamps signers include in their block-accept responses
+    function renderBlockFullness(data, nowEpoch) {
+      const container = document.getElementById("blockFullness");
+      if (!container || !window.BlockFullness) return;
+      const legend = document.getElementById("blockFullnessLegend");
+      const meta = document.getElementById("blockFullnessMeta");
+      const samples = (data.recent_execution_costs || [])
+        .filter((row) => row && Number.isFinite(Number(row.block_height)))
+        .slice(-12)
+        .reverse();
+      window.BlockFullness.renderTable(container, samples, {
+        limits: data.execution_cost_limits || null,
+        nowEpoch,
+        emptyText: "No confirmed blocks with costs yet.",
+      });
+      if (legend) legend.innerHTML = samples.length ? window.BlockFullness.legendHtml() : "";
+      if (!meta) return;
+      if (!samples.length) {
+        meta.textContent = "";
+        return;
+      }
+      const usages = samples
+        .map((row) => Number(row.percent_full))
+        .filter((value) => Number.isFinite(value));
+      const parts = [];
+      if (usages.length) {
+        const peak = Math.max(...usages);
+        const mean = usages.reduce((sum, value) => sum + value, 0) / usages.length;
+        parts.push("peak budget " + peak.toFixed(1) + "%");
+        parts.push("avg " + mean.toFixed(1) + "%");
+      }
+      const resets = samples.filter((row) => row.budget_reset === true).length;
+      if (resets) parts.push(resets + " budget reset" + (resets === 1 ? "" : "s"));
+      parts.push("budget used = tenure total through the block; this block = its own increment");
+      meta.textContent = parts.join(" | ");
+    }
+
     function renderExtendEta(data, nowEpoch) {
       const el = document.getElementById("extendEta");
       if (!el) return;
@@ -1668,6 +1704,7 @@
 
       renderBlockStrip(data, nowEpoch);
       renderExtendEta(data, nowEpoch);
+      renderBlockFullness(data, nowEpoch);
       renderBurnOutcomes(data);
       renderStallPanel(data);
 

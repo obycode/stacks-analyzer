@@ -6,6 +6,7 @@
   <title>Stacks Analyzer Dashboard</title>
     <link rel="stylesheet" href="/static/dashboard.css" />
     <link rel="stylesheet" href="/static/stall.css" />
+    <link rel="stylesheet" href="/static/blocks.css" />
 </head>
 <body>
   <div class="wrap">
@@ -15,6 +16,7 @@
       </div>
       <div class="header-right">
         <a class="header-link" href="/history">History</a>
+        <a class="header-link" href="/blocks">Blocks</a>
         <div class="height-chip" id="btcHeight">BTC: -</div>
         <div class="height-chip" id="stxHeight">STX: -</div>
         <div class="muted" id="updated">Waiting for data...</div>
@@ -46,6 +48,16 @@
       <div class="block-strip" id="blockStrip">
         <div class="strip-track" id="blockStripTrack"><span class="muted">Waiting for blocks...</span></div>
       </div>
+    </div>
+
+    <div class="card card-block-fullness">
+      <div class="panel-title panel-title-row">
+        <span>Block Fullness (Latest 12)</span>
+        <a class="link panel-link" href="/blocks">All blocks &rarr;</a>
+      </div>
+      <div id="blockFullness"><span class="muted">Waiting for confirmed blocks...</span></div>
+      <div class="bf-legend" id="blockFullnessLegend"></div>
+      <div class="chart-meta" id="blockFullnessMeta"></div>
     </div>
 
     <div class="card card-stall" id="stallCard">
@@ -213,6 +225,7 @@
   </div>
 
     <script src="/static/stall.js"></script>
+    <script src="/static/blocks.js"></script>
     <script src="/static/dashboard.js"></script>
 </body>
 </html>

@@ -30,6 +30,8 @@ class HistoryConfig:
     report_log_window_after_seconds: int = 300
     enable_sql_api: bool = False
     sql_api_max_rows: int = 500
+    # Confirmed block rows (the /blocks page) outlive raw events; 0 = keep forever.
+    block_retention_days: int = 5
 
 
 
@@ -178,6 +180,7 @@ def build_service_config(raw: Optional[Dict[str, Any]]) -> ServiceConfig:
         ),
         enable_sql_api=bool(history_payload.get("enable_sql_api", False)),
         sql_api_max_rows=int(history_payload.get("sql_api_max_rows", 500)),
+        block_retention_days=int(history_payload.get("block_retention_days", 5)),
     )
 
 
