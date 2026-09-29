@@ -23,7 +23,10 @@
     "burn_block_boundary_window_seconds": 15,
     "flash_block_seconds": 60,
     "stall_history_size": 50,
-    "stall_lookback_seconds": 900
+    "stall_lookback_seconds": 900,
+    "pre_commit_plateau_seconds": 30,
+    "early_rejection_seconds": 30,
+    "miner_rejection_timeout_steps": {"0": 180, "10": 90, "20": 45, "30": 0}
   },
   "telegram": {
     "enabled": false,

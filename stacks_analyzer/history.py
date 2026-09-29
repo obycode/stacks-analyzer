@@ -644,6 +644,8 @@ def should_store_event(kind: str, fields: Dict[str, Any]) -> bool:
         "node_winning_block_commit",
         "signer_state_machine_update",
         "signer_block_proposal",
+        "signer_block_reproposal",
+        "signer_no_global_state",
         "signer_block_validation_submitted",
         "signer_pending_block_validation_waiting_parent",
         "signer_pending_block_validation_found",

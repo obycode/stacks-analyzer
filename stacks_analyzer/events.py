@@ -756,6 +756,49 @@ class LogParser:
                     )
                 )
 
+            elif (
+                "received a block proposal for " in line
+                and "different reward cycle" not in line
+            ):
+                # The miner re-sent a proposal this signer already knows about
+                # (pre-committed, pending validation, rejected with a reason it may
+                # reconsider, ...). The miner does that when its wait for signer
+                # responses times out, so the gap between the first sighting and
+                # this one is the miner's retry delay.
+                block_height = extract_field(line, "block_height")
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_block_reproposal",
+                        ts=ts,
+                        fields={
+                            "signer_signature_hash": extract_field(
+                                line, "signer_signature_hash"
+                            ),
+                            "block_height": int(block_height) if block_height else None,
+                        },
+                        line=line,
+                    )
+                )
+
+            if "Cannot validate block, no global signer state" in line:
+                # The signers have not yet agreed on the current burn block / miner
+                # (typically seconds after a new Bitcoin block), so the proposal is
+                # rejected with NoSignerConsensus without being validated.
+                events.append(
+                    ParsedEvent(
+                        source=source,
+                        kind="signer_no_global_state",
+                        ts=ts,
+                        fields={
+                            "signer_signature_hash": extract_field(
+                                line, "signer_signature_hash"
+                            ),
+                        },
+                        line=line,
+                    )
+                )
+
             if "submitting block proposal for validation" in line:
                 signature_hash = extract_field(line, "signer_signature_hash")
                 block_height = extract_field(line, "block_height")

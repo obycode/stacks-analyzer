@@ -202,6 +202,37 @@
       )
     );
 
+    // The proposal that held the chain up, and where its time went
+    const stuck = diag.stuck_proposal;
+    if (stuck) {
+      const plateau = stuck.pre_commit_plateau || {};
+      const stuckNote = [];
+      if (isNum(plateau.seconds) && Number(plateau.seconds) >= 1) {
+        stuckNote.push(
+          "pre-commits flat at " + esc(plateau.weight ?? "?") + "/" + esc(plateau.required ?? "?") +
+            " for " + fmtSeconds(plateau.seconds)
+        );
+      }
+      if (isNum(stuck.early_reject_percent) && Number(stuck.early_reject_percent) > 0) {
+        stuckNote.push(esc(Number(stuck.early_reject_percent).toFixed(1)) + "% rejected early");
+      }
+      if (stuck.miner_retry && isNum(stuck.miner_retry.timeout_seconds)) {
+        stuckNote.push("miner retry timer " + fmtSeconds(stuck.miner_retry.timeout_seconds));
+      }
+      if (isNum(stuck.reproposals) && Number(stuck.reproposals) > 0) {
+        stuckNote.push("re-proposed after " + fmtSeconds(stuck.first_reproposal_after_seconds));
+      }
+      if (stuck.no_global_state) stuckNote.push("no agreed signer state");
+      out.push(
+        tile(
+          "Stuck proposal",
+          "height " + esc(stuck.block_height ?? "?") + ", " + fmtSeconds(stuck.stuck_seconds),
+          stuckNote.join("<br/>"),
+          "warn"
+        )
+      );
+    }
+
     // Burn blocks since last block
     const since = bitcoin.burn_blocks_since_last_stacks_block || [];
     out.push(
@@ -237,6 +268,38 @@
     const rejections = proposals.recent_rejections || [];
     const warnings = diag.log_warnings || [];
     const parts = [];
+    const stuck = diag.stuck_proposal;
+    if (stuck) {
+      const plateau = stuck.pre_commit_plateau || {};
+      const signerRows = [];
+      const addRows = (rows, role) => {
+        (rows || []).forEach((row) => {
+          signerRows.push(
+            "<tr><td>" + esc(role) + "</td><td>" + esc(row.label || "-") + "</td><td>" + esc(row.weight ?? "?") +
+              "</td><td>" + esc(row.reason || "") +
+              (isNum(row.after_seconds) ? " +" + fmtSeconds(row.after_seconds) : "") + "</td></tr>"
+          );
+        });
+      };
+      addRows(stuck.rejecting_signers, "rejected");
+      addRows(stuck.missing_pre_commit_signers, "not pre-committed");
+      addRows(plateau.ended_by, "ended the plateau");
+      addRows(stuck.threshold_crossed_by, "crossed the threshold");
+      const phases = stuck.phase_durations || {};
+      parts.push(
+        "<details class='stall-details' open><summary>Stuck proposal at height " + esc(stuck.block_height ?? "?") +
+          " (" + esc(shortHash(stuck.signature_hash, 12)) + ")</summary>" +
+          "<div class='muted'>validation " + fmtSeconds(phases.local_validation) +
+          " | pre-commit wait " + fmtSeconds(phases.pre_commit_wait) +
+          " | signatures " + fmtSeconds(phases.signature_gathering) + "</div>" +
+          (signerRows.length
+            ? "<table><thead><tr><th>Role</th><th>Signer</th><th>Weight</th><th>Detail</th></tr></thead><tbody>" +
+              signerRows.join("") +
+              "</tbody></table>"
+            : "") +
+          "</details>"
+      );
+    }
     if (open.length) {
       parts.push(
         "<details class='stall-details'><summary>Open proposals (" + open.length + ")</summary>" +

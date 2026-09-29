@@ -54,6 +54,15 @@ class ServiceConfig:
     history: HistoryConfig = field(default_factory=HistoryConfig)
 
 
+def _rejection_timeout_steps(raw: Any):
+    """Parse `{"0": 180, "10": 90, ...}` (the miner's toml shape) into sorted steps."""
+    if not isinstance(raw, dict) or not raw:
+        return DetectorConfig.miner_rejection_timeout_steps
+    return tuple(
+        sorted((float(percent), int(seconds)) for percent, seconds in raw.items())
+    )
+
+
 def load_json_config(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -145,6 +154,19 @@ def build_service_config(raw: Optional[Dict[str, Any]]) -> ServiceConfig:
         stall_lookback_seconds=int(
             detector_payload.get(
                 "stall_lookback_seconds", DetectorConfig.stall_lookback_seconds
+            )
+        ),
+        miner_rejection_timeout_steps=_rejection_timeout_steps(
+            detector_payload.get("miner_rejection_timeout_steps")
+        ),
+        pre_commit_plateau_seconds=int(
+            detector_payload.get(
+                "pre_commit_plateau_seconds", DetectorConfig.pre_commit_plateau_seconds
+            )
+        ),
+        early_rejection_seconds=int(
+            detector_payload.get(
+                "early_rejection_seconds", DetectorConfig.early_rejection_seconds
             )
         ),
     )

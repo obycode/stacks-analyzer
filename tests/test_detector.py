@@ -1604,8 +1604,24 @@ class TestDetector(unittest.TestCase):
         recent = snapshot["recent_proposals"]
         rejected_row = next(row for row in recent if row["signature_hash"] == rejected_hash)
         self.assertEqual(rejected_row["status"], "rejected")
-        self.assertFalse(rejected_row["is_open"])
-        self.assertEqual(snapshot["open_proposals_count"], 0)
+        # Our rejection is one vote: the proposal stays open until the network
+        # decides, since the rest of the set may still sign it.
+        self.assertTrue(rejected_row["is_open"])
+        self.assertIn(rejected_hash, detector.proposals)
+
+        detector.process_event(
+            ParsedEvent(
+                source="signer",
+                kind="signer_threshold_reached",
+                ts=190.0,
+                fields={"signer_signature_hash": rejected_hash, "percent_approved": 72.0},
+            )
+        )
+        snapshot = detector.snapshot(now=191.0)
+        row = next(
+            row for row in snapshot["recent_proposals"] if row["signature_hash"] == rejected_hash
+        )
+        self.assertEqual(row["status"], "approved")
 
     def test_rejection_threshold_finalizes_proposal(self) -> None:
         detector = Detector(

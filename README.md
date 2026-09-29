@@ -208,6 +208,17 @@ the stall, built from what the logs had said up to that moment:
   pre-commits that arrived before their proposal, the last tenure extend and
   whether the network was already willing to accept one.
 - ERROR/WARN lines from either process in the window (p2p chatter dropped).
+- The stuck proposal (`stuck_proposal`): of every proposal open during the
+  stall, the one that held the chain up longest. Each is charged until it was
+  signed or a newer proposal at the same height replaced it. It records how long
+  each phase took (local validation, pre-commit wait, signature gathering), the
+  longest span the pre-commit tally sat flat below the threshold and whose
+  pre-commits ended it, which known signers had not pre-committed, who rejected
+  it within `early_rejection_seconds` (default 30) and why, the share of weight
+  those early rejections carry, the miner retry timer that share implies, and
+  how many times the miner re-proposed it. These rows are kept for the whole
+  stall and refreshed when the proposal closes, so the diagnosis at recovery
+  still describes what held the chain up, not just the state of the last tick.
 
 The entry is refreshed on every tick while the stall lasts and finalized on
 recovery with the duration and the height that resumed. It is shown in the
@@ -216,9 +227,35 @@ in `/api/state` under `stall_diagnostics` (`active` and `recent`), in the AI
 package, and summarized in the stall alert text itself
 (`shape=... | tenure=... | miner=... | last_block=... | btc=... | mempool_ready=...`).
 
+The stuck proposal drives three shapes, checked before the others:
+
+- `no_signer_consensus`: our signer logged "no global signer state", or a signer
+  rejected early with `NoSignerConsensus`. Signers had not yet agreed on the
+  chain state, typically because a tenure's first block was proposed seconds
+  after its Bitcoin block.
+- `minority_rejection_wait`: some signers rejected early, but less than the 30%
+  that makes the miner give up (e.g. `InvalidTenureExtend` on an extend
+  proposed too early). The rest pre-commit, but the tally falls short, so the
+  miner waits out its `block_rejection_timeout_steps` timer and re-proposes.
+- `pre_commit_plateau`: no early rejections, but pre-commits sat flat below the
+  threshold for at least `pre_commit_plateau_seconds` (default 30). Some signer
+  weight went silent, and the miner waits its full no-rejection timer.
+
+The alert text adds `precommits=W/R flat=Ns`, `early_reject=P%(reasons)`,
+`miner_retry~Ns` and `reproposed=N` when they apply.
+
 Detector config: `flash_block_seconds`, `stall_history_size` (default 50),
 `stall_lookback_seconds` (default 900, how far back reorgs, flash blocks and
-warnings are collected).
+warnings are collected), `pre_commit_plateau_seconds`, `early_rejection_seconds`,
+and `miner_rejection_timeout_steps`. The last one mirrors the miners'
+`[miner.block_rejection_timeout_steps]` (default
+`{"0": 180, "10": 90, "20": 45, "30": 0}`: rejected weight percent to seconds
+before re-proposing).
+
+When this signer rejects a proposal, the proposal stays tracked until the
+network decides: its re-proposal, pre-commits and signatures are still
+followed. Pre-commits the signer logs as "for an unknown block" for a proposal
+it saw but rejected count toward that proposal's tally, not as late delivery.
 
 ## Output
 

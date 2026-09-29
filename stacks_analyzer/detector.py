@@ -77,9 +77,32 @@ class DetectorConfig:
     # Diagnostics look this far back from the stall for reorgs, flash blocks and
     # log warnings, and at least as far as the last Stacks block.
     stall_lookback_seconds: int = 900
+    # Mirror of the miners' `block_rejection_timeout_steps`: (rejected weight %,
+    # seconds the miner waits before re-proposing). With a minority rejecting, the
+    # miner neither gives up nor gets its signatures and just waits out this timer,
+    # which is what most ~90s stalls turn out to be.
+    miner_rejection_timeout_steps: Tuple[Tuple[float, int], ...] = (
+        (0.0, 180),
+        (10.0, 90),
+        (20.0, 45),
+        (30.0, 0),
+    )
+    # Pre-commit weight flat for this long below the threshold is named as its own
+    # stall shape: the block is valid, some signer weight is just not showing up.
+    pre_commit_plateau_seconds: int = 30
+    # Only rejections this soon after the proposal count as the ones that set the
+    # miner's retry timer; later ones (e.g. after a new burn block) are a symptom.
+    early_rejection_seconds: int = 30
 
+
+# Stands in for this signer's pubkey (which its logs never state) in
+# `ProposalState.reject_details`.
+LOCAL_SIGNER_KEY = "self"
 
 STALL_SHAPE_LABELS = {
+    "no_signer_consensus": "Rejected before signers agreed on the chain state",
+    "minority_rejection_wait": "Minority rejected, miner waiting to retry",
+    "pre_commit_plateau": "Pre-commits stalled below threshold",
     "idle_mempool": "Nothing to mine",
     "tenure_start_no_block": "New tenure, no first block",
     "tenure_start_proposal_stuck": "New tenure, first block stuck with signers",
@@ -136,6 +159,22 @@ class ProposalState:
     # the *shape* of the ramp -- a smooth climb means propagation was uniformly slow,
     # a flat line then a step means one high-weight signer was holding everyone up.
     pre_commit_ramp: List[Tuple[float, int]] = field(default_factory=list)
+    # Weight each pre-committing signer brought (address -> weight).
+    pre_commit_weights: Dict[str, int] = field(default_factory=dict)
+    # Last time the running pre-commit weight went up, and the longest span it
+    # stayed flat below the threshold: {seconds, weight, start_ts, end_ts, ended_by}.
+    last_weight_increase_ts: Optional[float] = None
+    longest_pre_commit_plateau: Optional[Dict[str, object]] = None
+    # pubkey -> {"reason", "ts"}: the first rejection each signer sent.
+    reject_details: Dict[str, Dict[str, object]] = field(default_factory=dict)
+    # Times the miner re-sent this proposal after the first sighting.
+    reproposal_ts: List[float] = field(default_factory=list)
+    # When our signer refused to validate it for lack of an agreed signer state.
+    no_global_state_ts: Optional[float] = None
+    # Addresses whose pre-commits arrived just before the threshold was crossed.
+    threshold_crossed_by: List[str] = field(default_factory=list)
+    # When this signer first rejected the proposal (our own vote, not the outcome).
+    local_reject_ts: Optional[float] = None
 
 
 @dataclass
@@ -373,6 +412,9 @@ class Detector:
         # acceptance log's own `signer_address` when present, otherwise derived from
         # the pubkey -- the address is a pure function of it.
         self.signer_address_to_pubkey: Dict[str, str] = {}
+        # Latest weight each signer address reported with a pre-commit; the set of
+        # signers we know to exist, for naming who is missing from a stuck tally.
+        self.signer_weight_by_address: Dict[str, int] = {}
         # Counts cases where a logged address disagreed with the derived one. Should
         # stay at zero; a non-zero value means the derivation assumption is wrong and
         # the joined rows cannot be trusted.
@@ -913,6 +955,8 @@ class Detector:
                         burn_height=event.fields.get("burn_height"),
                     ),
                 )
+                if state.proposal_seen:
+                    state.reproposal_ts.append(event.ts)
                 if not state.proposal_seen:
                     # Another signer's pre-commit may have created this state before
                     # the proposal reached us, in which case start_ts was its arrival
@@ -931,6 +975,19 @@ class Detector:
                     ts=event.ts,
                     is_open=True,
                 )
+
+        elif event.kind == "signer_block_reproposal":
+            signature_hash = event.fields.get("signer_signature_hash")
+            state = self.proposals.get(signature_hash) if signature_hash else None
+            if state is not None:
+                state.reproposal_ts.append(event.ts)
+
+        elif event.kind == "signer_no_global_state":
+            signature_hash = event.fields.get("signer_signature_hash")
+            if signature_hash and not self._is_recently_closed(signature_hash, event.ts):
+                state = self.proposals.setdefault(signature_hash, ProposalState(event.ts))
+                if state.no_global_state_ts is None:
+                    state.no_global_state_ts = event.ts
 
         elif event.kind == "signer_block_pre_commit_sent":
             signature_hash = event.fields.get("signer_signature_hash")
@@ -953,7 +1010,13 @@ class Detector:
                 if isinstance(required, int):
                     state.pre_commit_weight_required = required
                 weight = event.fields.get("pre_commit_weight")
+                address = event.fields.get("signer_address")
+                signer_weight = event.fields.get("signer_weight")
+                if address and isinstance(signer_weight, int):
+                    self.signer_weight_by_address[address] = signer_weight
+                    state.pre_commit_weights.setdefault(address, signer_weight)
                 if isinstance(weight, int):
+                    self._track_pre_commit_plateau(state, event.ts, weight, address)
                     state.max_pre_commit_weight = max(state.max_pre_commit_weight, weight)
                     if len(state.pre_commit_ramp) < 64:
                         state.pre_commit_ramp.append((event.ts, weight))
@@ -961,7 +1024,6 @@ class Detector:
                 if state.first_pre_commit_ts is None:
                     state.first_pre_commit_ts = event.ts
 
-                address = event.fields.get("signer_address")
                 if address and address not in state.pre_commit_signers:
                     state.pre_commit_signers[address] = event.ts
                     # Lateness is measured against our own receipt of the proposal --
@@ -979,9 +1041,29 @@ class Detector:
                     and state.pre_commit_threshold_ts is None
                 ):
                     state.pre_commit_threshold_ts = event.ts
+                    # Who carried the tally over: the weight that arrived in the
+                    # last few seconds before the crossing, heaviest first.
+                    state.threshold_crossed_by = sorted(
+                        (
+                            addr
+                            for addr, seen_ts in state.pre_commit_signers.items()
+                            if seen_ts >= event.ts - 5.0
+                        ),
+                        key=lambda addr: -state.pre_commit_weights.get(addr, 0),
+                    )[:3]
 
         elif event.kind == "signer_block_pre_commit_unknown":
-            self.pre_commits_before_proposal.append(event.ts)
+            signature_hash = event.fields.get("signer_signature_hash")
+            state = self.proposals.get(signature_hash) if signature_hash else None
+            if state is not None and state.proposal_seen:
+                # We did see this proposal, but rejected it without storing it (no
+                # agreed signer state, an extend we considered premature, ...), so
+                # the signer calls it unknown. That is not late delivery; it is the
+                # rest of the set voting for a block we turned down, and it belongs
+                # in the proposal's tally.
+                self._count_untallied_pre_commit(state, event)
+            else:
+                self.pre_commits_before_proposal.append(event.ts)
 
         elif event.kind == "signer_block_validate_ok":
             self.last_signer_validation_ts = event.ts
@@ -1317,6 +1399,11 @@ class Detector:
                 self.proposal_reject_reasons[signature_hash] = str(reject_reason)
                 if not self._is_recently_closed(signature_hash, event.ts):
                     state = self.proposals.setdefault(signature_hash, ProposalState(event.ts))
+                    if state.local_reject_ts is None:
+                        state.local_reject_ts = event.ts
+                    state.reject_details.setdefault(
+                        LOCAL_SIGNER_KEY, {"reason": str(reject_reason), "ts": event.ts}
+                    )
                     self._apply_rejection_event(state, event)
                     self._record_proposal_activity(
                         signature_hash=signature_hash,
@@ -1354,13 +1441,10 @@ class Detector:
                             reject_reason=str(reject_reason),
                             alerts=alerts,
                         )
-                    alerts.extend(
-                        self._finalize_proposal(
-                            signature_hash,
-                            event.ts,
-                            finalize_reason="rejected",
-                        )
-                    )
+                    # Our rejection is one vote, not the outcome: the rest of the set
+                    # may pre-commit and sign it (often after the miner re-proposes
+                    # it), so keep following the proposal until the network rejects
+                    # it, it is pushed, or it ages out.
 
         return alerts
 
@@ -1556,8 +1640,18 @@ class Detector:
             "miner_at_detection": entry.get("miner_at_detection"),
             "shape_at_detection": entry.get("shape_at_detection"),
         }
+        seen_rows = {
+            row.get("signature_hash"): row
+            for row in (entry.get("proposals") or {}).get("during_stall") or []
+        }
         entry.update(fresh)
         entry.update(preserved)
+        for row in (fresh.get("proposals") or {}).get("during_stall") or []:
+            seen_rows[row.get("signature_hash")] = row
+        entry["proposals"]["during_stall"] = sorted(
+            seen_rows.values(), key=lambda row: float(row.get("start_ts") or 0.0)
+        )[-10:]
+        self._apply_stall_classification(entry)
         miner_then = (preserved.get("miner_at_detection") or {}).get(
             "expected_apparent_sender"
         )
@@ -1588,7 +1682,36 @@ class Detector:
             entry["recovered_height"] = self.last_signer_proposal_height
         else:
             entry["recovered_height"] = self.last_node_tip_height
+        self._refresh_stall_rows(entry, ts)
         return entry
+
+    def _refresh_stall_rows(
+        self,
+        entry: Dict[str, object],
+        ts: float,
+        closed: Optional[Tuple[str, ProposalState]] = None,
+    ) -> None:
+        """Bring the stall's proposal rows up to date and re-diagnose.
+
+        Called when a tracked proposal closes (its final pre-commit and signing
+        times are only known then) and when the stall recovers.
+        """
+        proposals = entry.get("proposals")
+        if not isinstance(proposals, dict):
+            return
+        rows = proposals.get("during_stall") or []
+        changed = False
+        for index, row in enumerate(rows):
+            signature_hash = row.get("signature_hash")
+            if closed is not None and signature_hash == closed[0]:
+                state: Optional[ProposalState] = closed[1]
+            else:
+                state = self.proposals.get(signature_hash)
+            if state is not None:
+                rows[index] = self._stall_proposal_row(str(signature_hash), state, ts)
+                changed = True
+        if changed or closed is None:
+            self._apply_stall_classification(entry)
 
     @staticmethod
     def _stall_message_suffix(diagnostics: Optional[Dict[str, object]]) -> str:
@@ -1600,6 +1723,7 @@ class Detector:
         miner = diagnostics.get("miner") or {}
         mempool = diagnostics.get("mempool") or {}
         parts = ["shape=%s" % diagnostics.get("shape", "unknown")]
+        parts.extend(Detector._stuck_summary_parts(diagnostics))
         position = tenure.get("position")
         if position:
             parts.append("tenure=%s" % position)
@@ -1621,6 +1745,38 @@ class Detector:
         if isinstance(flash, dict) and flash.get("seen"):
             parts.append("flash_block=yes")
         return " | " + " | ".join(parts)
+
+    @staticmethod
+    def _stuck_summary_parts(diagnostics: Dict[str, object]) -> List[str]:
+        """Compact `key=value` notes on the proposal that held the chain up."""
+        stuck = diagnostics.get("stuck_proposal")
+        if not isinstance(stuck, dict):
+            return []
+        parts: List[str] = []
+        plateau = stuck.get("pre_commit_plateau") or {}
+        if isinstance(plateau.get("seconds"), (int, float)) and plateau["seconds"] >= 1.0:
+            parts.append(
+                "precommits=%s/%s flat=%.0fs"
+                % (plateau.get("weight"), plateau.get("required") or "?", plateau["seconds"])
+            )
+        early = [row for row in stuck.get("rejecting_signers") or [] if row.get("early")]
+        if early:
+            reasons = sorted({str(row.get("reason")) for row in early})
+            percent = stuck.get("early_reject_percent")
+            parts.append(
+                "early_reject=%s(%s)"
+                % (
+                    "%.1f%%" % percent if isinstance(percent, (int, float)) else "?",
+                    ",".join(reasons),
+                )
+            )
+        retry = stuck.get("miner_retry")
+        weight_known = isinstance(stuck.get("early_reject_percent"), (int, float))
+        if isinstance(retry, dict) and (weight_known or (not early and parts)):
+            parts.append("miner_retry~%ss" % retry.get("timeout_seconds"))
+        if stuck.get("reproposals"):
+            parts.append("reproposed=%s" % stuck["reproposals"])
+        return parts
 
     def _record_log_warning(self, event: ParsedEvent) -> None:
         line = event.line or ""
@@ -1904,21 +2060,7 @@ class Detector:
                 # Replaying files: the signer log can run ahead of the node log,
                 # so this proposal is from after the stall being described.
                 continue
-            open_rows.append(
-                {
-                    "signature_hash": signature_hash,
-                    "block_height": state.block_height,
-                    "age_seconds": max(0.0, ts - state.start_ts),
-                    "phase": self._proposal_phase(state, ts),
-                    "max_percent_observed": state.max_percent,
-                    "max_reject_percent": state.max_reject_percent,
-                    "reject_reasons": sorted(state.reject_reasons),
-                    "pre_commit_weight": state.max_pre_commit_weight or None,
-                    "pre_commit_weight_required": state.pre_commit_weight_required,
-                    "accept_signers": len(state.signers),
-                    "reject_signers": len(state.reject_signers),
-                }
-            )
+            open_rows.append(self._stall_proposal_row(signature_hash, state, ts))
         open_rows.sort(key=lambda row: float(row["age_seconds"]), reverse=True)
         rejections: List[Dict[str, object]] = []
         for entry in reversed(self.recent_rejections):
@@ -1939,6 +2081,10 @@ class Detector:
         proposals: Dict[str, object] = {
             "open_count": len(open_rows),
             "open": open_rows[:10],
+            # Every proposal seen open while this stall lasted, kept after it closes
+            # (merged across refreshes in `_note_stall`), so the diagnosis at
+            # recovery still describes what held the chain up.
+            "during_stall": [dict(row) for row in open_rows[:10]],
             "recent_rejections": rejections,
             "pre_commits_before_proposal": len(self.pre_commits_before_proposal),
             "last_validation_ms": self.last_signer_validation_ms,
@@ -1974,12 +2120,74 @@ class Detector:
             "proposals": proposals,
             "log_warnings": log_warnings,
         }
+        self._apply_stall_classification(entry)
+        entry["shape_at_detection"] = entry["shape"]
+        return entry
+
+    def _apply_stall_classification(self, entry: Dict[str, object]) -> None:
+        proposals = entry.get("proposals") or {}
+        stuck = self._pick_stuck_proposal(
+            proposals.get("during_stall") or [],
+            stalled_since=entry.get("stalled_since_ts"),
+            now=entry.get("last_seen_ts"),
+        )
+        if stuck is not None:
+            stuck["stall_active"] = bool(entry.get("active"))
+        entry["stuck_proposal"] = stuck
         shape, factors = self._classify_stall(entry)
         entry["shape"] = shape
         entry["shape_label"] = STALL_SHAPE_LABELS.get(shape, shape)
-        entry["shape_at_detection"] = shape
         entry["factors"] = factors
-        return entry
+
+    @staticmethod
+    def _pick_stuck_proposal(
+        rows: List[Dict[str, object]],
+        stalled_since: object,
+        now: object,
+    ) -> Optional[Dict[str, object]]:
+        """The proposal that held the chain up for the largest share of the stall.
+
+        Each proposal is charged from when it arrived (or the stall began) until it
+        was signed, a newer proposal at the same or a greater height replaced it,
+        or now. A stall can pass through several proposals (a mid-tenure extend,
+        then the next tenure's first block); the diagnosis names the one that
+        cost the most time.
+        """
+        if not rows or not isinstance(now, (int, float)):
+            return None
+        since = float(stalled_since) if isinstance(stalled_since, (int, float)) else None
+        best: Optional[Dict[str, object]] = None
+        best_span = -1.0
+        for row in rows:
+            start = row.get("start_ts")
+            if not isinstance(start, (int, float)):
+                continue
+            end = float(now)
+            signed = row.get("signed_ts")
+            if isinstance(signed, (int, float)):
+                end = min(end, float(signed))
+            height = row.get("block_height")
+            for other in rows:
+                other_start = other.get("start_ts")
+                other_height = other.get("block_height")
+                if (
+                    other is not row
+                    and isinstance(other_start, (int, float))
+                    and other_start > start
+                    and isinstance(height, int)
+                    and isinstance(other_height, int)
+                    and other_height >= height
+                ):
+                    end = min(end, float(other_start))
+            begin = max(float(start), since) if since is not None else float(start)
+            span = max(0.0, end - begin)
+            if span > best_span:
+                best, best_span = row, span
+        if best is None:
+            return None
+        picked = dict(best)
+        picked["stuck_seconds"] = best_span
+        return picked
 
     def _classify_stall(
         self, entry: Dict[str, object]
@@ -2004,8 +2212,12 @@ class Detector:
         since_block = bitcoin.get("burn_blocks_since_last_stacks_block") or []
         open_rows = proposals.get("open") or []
         position = tenure.get("position")
+        stuck = entry.get("stuck_proposal") or {}
+        stuck_shape = self._stuck_proposal_shape(stuck)
 
-        if mempool.get("empty_recent"):
+        if stuck_shape:
+            shape = stuck_shape
+        elif mempool.get("empty_recent"):
             shape = "idle_mempool"
         elif kind == "signer" and self.last_signer_proposal_ts is None:
             shape = "no_proposals_seen"
@@ -2102,6 +2314,8 @@ class Detector:
                     or "validated locally, no pre-commit visibility on this signer build",
                 )
             )
+        if stuck:
+            factors.extend(self._stuck_proposal_factors(stuck, fmt_seconds))
         rejections = proposals.get("recent_rejections") or []
         if rejections:
             reasons: Dict[str, int] = {}
@@ -2147,6 +2361,140 @@ class Detector:
                 )
             )
         return shape, factors
+
+    def _stuck_proposal_shape(self, stuck: Dict[str, object]) -> Optional[str]:
+        """Shapes that only a proposal's own history can tell apart.
+
+        All three are "the block was valid and still did not get signed", and the
+        remedy differs: signers without an agreed chain state need time (or the
+        miner to wait for it), a minority rejection means the miner is sitting out
+        its `block_rejection_timeout_steps` timer, and a flat pre-commit tally
+        with no rejections means some signer weight has gone silent.
+        """
+        if not stuck or float(stuck.get("stuck_seconds") or 0.0) < 1.0:
+            return None
+        early = [row for row in stuck.get("rejecting_signers") or [] if row.get("early")]
+        if stuck.get("no_global_state") or any(
+            row.get("reason") == "NoSignerConsensus" for row in early
+        ):
+            return "no_signer_consensus"
+        early_percent = stuck.get("early_reject_percent")
+        if early and not (
+            isinstance(early_percent, (int, float)) and early_percent >= 30.0
+        ):
+            return "minority_rejection_wait"
+        plateau = stuck.get("pre_commit_plateau") or {}
+        if float(plateau.get("seconds") or 0.0) >= self.config.pre_commit_plateau_seconds:
+            return "pre_commit_plateau"
+        return None
+
+    def _stuck_proposal_factors(self, stuck: Dict[str, object], fmt_seconds) -> List[str]:
+        factors: List[str] = []
+        height = stuck.get("block_height")
+        label = "Proposal %s" % (
+            "at height %s" % height if height is not None else str(stuck.get("signature_hash"))[:12]
+        )
+
+        def names(rows: List[Dict[str, object]]) -> str:
+            return ", ".join(
+                "%s (%s)" % (row.get("label"), row.get("weight") if row.get("weight") is not None else "?")
+                for row in rows
+            )
+
+        phases = stuck.get("phase_durations") or {}
+        parts = [
+            "%s %s" % (title, fmt_seconds(phases.get(name)))
+            for name, title in (
+                ("local_validation", "validation"),
+                ("pre_commit_wait", "pre-commit wait"),
+                ("signature_gathering", "signatures"),
+            )
+            if isinstance(phases.get(name), (int, float))
+        ]
+        if parts:
+            factors.append(
+                "%s held the chain for %s: %s"
+                % (label, fmt_seconds(stuck.get("stuck_seconds")), ", ".join(parts))
+            )
+        plateau = stuck.get("pre_commit_plateau") or {}
+        if float(plateau.get("seconds") or 0.0) >= self.config.pre_commit_plateau_seconds:
+            text = "Pre-commits flat at %s/%s for %s" % (
+                plateau.get("weight"),
+                plateau.get("required") if plateau.get("required") is not None else "?",
+                fmt_seconds(plateau.get("seconds")),
+            )
+            if plateau.get("ongoing"):
+                text += " and counting" if stuck.get("stall_active") else ", never crossed"
+            elif plateau.get("ended_by"):
+                text += "; ended by " + names(plateau["ended_by"])
+            factors.append(text)
+            if stuck.get("threshold_crossed_by"):
+                factors.append(
+                    "Pre-commit threshold reached once %s pre-committed"
+                    % names(stuck["threshold_crossed_by"])
+                )
+        missing = stuck.get("missing_pre_commit_signers") or []
+        if missing:
+            factors.append("Not pre-committed yet: " + names(missing))
+        early = [row for row in stuck.get("rejecting_signers") or [] if row.get("early")]
+        retry = stuck.get("miner_retry") or {}
+        if early:
+            percent = stuck.get("early_reject_percent")
+            factors.append(
+                "Rejected within %ds by %s%s"
+                % (
+                    self.config.early_rejection_seconds,
+                    ", ".join(
+                        "%s (%s, %s)"
+                        % (
+                            row.get("label"),
+                            row.get("weight") if row.get("weight") is not None else "?",
+                            row.get("reason"),
+                        )
+                        for row in early
+                    ),
+                    " = %.1f%% of weight" % percent if isinstance(percent, (int, float)) else "",
+                )
+            )
+        plateaued = (
+            float(plateau.get("seconds") or 0.0) >= self.config.pre_commit_plateau_seconds
+        )
+        early_percent = stuck.get("early_reject_percent")
+        if retry and not early and (plateaued or stuck.get("reproposals")):
+            factors.append(
+                "No early rejections: the miner waits ~%s before re-proposing"
+                " (miner_rejection_timeout_steps)" % fmt_seconds(retry.get("timeout_seconds"))
+            )
+        elif retry and early and isinstance(early_percent, (int, float)):
+            factors.append(
+                "At %.1f%% rejected the miner re-proposes after ~%s (miner_rejection_timeout_steps)"
+                % (float(early_percent), fmt_seconds(retry.get("timeout_seconds")))
+            )
+        if stuck.get("reproposals"):
+            factors.append(
+                "Miner re-proposed it %d time(s), first after %s"
+                % (stuck["reproposals"], fmt_seconds(stuck.get("first_reproposal_after_seconds")))
+            )
+        if stuck.get("no_global_state"):
+            start = stuck.get("start_ts")
+            burn = None
+            if isinstance(start, (int, float)):
+                burn = next(
+                    (
+                        (burn_ts, burn_height)
+                        for burn_ts, burn_height in reversed(self.recent_burn_block_events)
+                        if burn_ts <= start
+                    ),
+                    None,
+                )
+            if burn is not None:
+                factors.append(
+                    "Our signer had no agreed signer state when it arrived, %s after burn block %s"
+                    % (fmt_seconds(float(start) - burn[0]), burn[1])
+                )
+            else:
+                factors.append("Our signer had no agreed signer state when it arrived")
+        return factors
 
     def _detect_mempool_empty(self, ts: float, alerts: List[Alert]) -> None:
         if self.last_mempool_stop_reason != "NoMoreCandidates":
@@ -2377,6 +2725,267 @@ class Detector:
         rows.sort(key=lambda item: item[1], reverse=True)
         return rows[:limit]
 
+    def _track_pre_commit_plateau(
+        self,
+        state: ProposalState,
+        ts: float,
+        weight: int,
+        address: Optional[str],
+    ) -> None:
+        """Remember the longest span the pre-commit tally sat flat below threshold.
+
+        A tally that climbs to just under 70% and then stops is the signature of a
+        stall that is nobody's validation problem: the block is fine, one or two
+        high-weight signers are simply not pre-committing (they rejected it, or went
+        silent). The arrivals that end the span name who the network waited for.
+        """
+        if state.last_weight_increase_ts is None:
+            state.last_weight_increase_ts = ts
+            return
+        if weight <= state.max_pre_commit_weight:
+            return
+        if state.pre_commit_threshold_ts is None:
+            plateau = state.longest_pre_commit_plateau
+            gap = ts - state.last_weight_increase_ts
+            if plateau is None or gap > float(plateau["seconds"]):
+                plateau = {
+                    "seconds": gap,
+                    "weight": state.max_pre_commit_weight,
+                    "start_ts": state.last_weight_increase_ts,
+                    "end_ts": ts,
+                    "ended_by": [],
+                }
+                state.longest_pre_commit_plateau = plateau
+            ended_by = plateau["ended_by"]
+            if (
+                address
+                and ts - float(plateau["end_ts"]) <= 5.0
+                and all(row.get("address") != address for row in ended_by)
+            ):
+                ended_by.append(
+                    {"address": address, "weight": state.pre_commit_weights.get(address)}
+                )
+        state.last_weight_increase_ts = ts
+
+    def _count_untallied_pre_commit(self, state: ProposalState, event: ParsedEvent) -> None:
+        """Add a pre-commit that arrived without the signer's running tally.
+
+        The running weight is then our own sum of the weights seen so far.
+        """
+        address = event.fields.get("signer_address")
+        if not address or address in state.pre_commit_signers:
+            return
+        signer_weight = event.fields.get("signer_weight")
+        if isinstance(signer_weight, int):
+            self.signer_weight_by_address[address] = signer_weight
+            state.pre_commit_weights[address] = signer_weight
+        if state.first_pre_commit_ts is None:
+            state.first_pre_commit_ts = event.ts
+        state.pre_commit_signers[address] = event.ts
+        weight = sum(state.pre_commit_weights.values())
+        self._track_pre_commit_plateau(state, event.ts, weight, address)
+        state.max_pre_commit_weight = max(state.max_pre_commit_weight, weight)
+
+    def _signer_weight(self, pubkey: str) -> Optional[int]:
+        samples = self.signer_weight_samples.get(pubkey)
+        if samples:
+            return int(statistics.median(samples))
+        address = pubkey_to_address(pubkey)
+        if address is not None:
+            return self.signer_weight_by_address.get(address)
+        return None
+
+    def _address_label(self, address: str) -> str:
+        pubkey = self.signer_address_to_pubkey.get(address)
+        if pubkey:
+            return self._signer_label(pubkey)
+        return "%s.." % address[:10]
+
+    def _miner_retry_timeout(self, reject_percent: float) -> Optional[int]:
+        timeout: Optional[int] = None
+        for percent, seconds in sorted(self.config.miner_rejection_timeout_steps):
+            if reject_percent >= percent:
+                timeout = int(seconds)
+        return timeout
+
+    def _stall_proposal_row(
+        self, signature_hash: str, state: ProposalState, ts: float
+    ) -> Dict[str, object]:
+        """Describe a proposal that was open during a stall, in terms that stay
+        true after the fact: how long each pipeline phase took, how long the
+        pre-commit tally sat flat and who ended it, who rejected early and why,
+        and what that rejection weight means for the miner's retry timer."""
+        total_weight = state.total_weight
+        if not isinstance(total_weight, int) and self.total_weight_samples:
+            total_weight = int(self.total_weight_samples[-1])
+
+        def pct(weight: Optional[int]) -> Optional[float]:
+            if isinstance(weight, int) and isinstance(total_weight, int) and total_weight > 0:
+                return weight * 100.0 / total_weight
+            return None
+
+        # Phase durations, each closed once the next phase begins.
+        # Our first response (pre-commit or rejection) ends local validation.
+        own_times = [
+            value
+            for value in (state.own_pre_commit_ts, state.local_reject_ts)
+            if isinstance(value, (int, float))
+        ]
+        own = min(own_times) if own_times else None
+        pc_done = state.pre_commit_threshold_ts
+        signed = state.threshold_ts
+        phases: Dict[str, Optional[float]] = {
+            "local_validation": (own if own is not None else ts) - state.start_ts,
+            "pre_commit_wait": (
+                None
+                if own is None or not state.pre_commit_signers
+                else (pc_done if pc_done is not None else ts) - own
+            ),
+            "signature_gathering": (
+                None
+                if pc_done is None
+                else (signed if signed is not None else ts) - pc_done
+            ),
+        }
+        phases = {
+            name: max(0.0, value) if isinstance(value, (int, float)) else None
+            for name, value in phases.items()
+        }
+        dominant_phase = max(
+            (name for name, value in phases.items() if value is not None),
+            key=lambda name: phases[name] or 0.0,
+            default=None,
+        )
+
+        # Pre-commit plateau: the ongoing one if the tally is still short,
+        # otherwise the longest one before it crossed.
+        plateau: Optional[Dict[str, object]] = None
+        longest = state.longest_pre_commit_plateau
+        if longest is not None:
+            plateau = dict(longest)
+            plateau["ongoing"] = False
+        if pc_done is None and state.last_weight_increase_ts is not None:
+            current = ts - state.last_weight_increase_ts
+            if plateau is None or current > float(plateau["seconds"]):
+                plateau = {
+                    "seconds": current,
+                    "weight": state.max_pre_commit_weight,
+                    "start_ts": state.last_weight_increase_ts,
+                    "end_ts": None,
+                    "ended_by": [],
+                    "ongoing": True,
+                }
+        if plateau is not None:
+            plateau["required"] = state.pre_commit_weight_required
+            plateau["ended_by"] = sorted(
+                (
+                    {
+                        "address": row.get("address"),
+                        "label": self._address_label(str(row.get("address"))),
+                        "weight": row.get("weight"),
+                    }
+                    for row in plateau.get("ended_by") or []
+                    if row.get("weight") != 0
+                ),
+                key=lambda row: -(row.get("weight") or 0),
+            )[:3]
+
+        missing: List[Dict[str, object]] = []
+        if pc_done is None and state.pre_commit_signers:
+            for address, weight in sorted(
+                self.signer_weight_by_address.items(), key=lambda item: -item[1]
+            ):
+                if address in state.pre_commit_signers or weight <= 0:
+                    continue
+                missing.append(
+                    {"address": address, "label": self._address_label(address), "weight": weight}
+                )
+            missing = missing[:5]
+
+        rejecting: List[Dict[str, object]] = []
+        early_weight = 0
+        early_known = False
+        reason_counts: Dict[str, int] = {}
+        for pubkey, detail in state.reject_details.items():
+            reason = detail.get("reason") or "unknown"
+            reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + 1
+            weight = None if pubkey == LOCAL_SIGNER_KEY else self._signer_weight(pubkey)
+            reject_ts = detail.get("ts")
+            offset = (
+                float(reject_ts) - state.start_ts
+                if isinstance(reject_ts, (int, float))
+                else None
+            )
+            early = offset is not None and offset <= self.config.early_rejection_seconds
+            if early and isinstance(weight, int):
+                early_weight += weight
+                early_known = True
+            rejecting.append(
+                {
+                    "label": (
+                        "this signer" if pubkey == LOCAL_SIGNER_KEY else self._signer_label(pubkey)
+                    ),
+                    "weight": weight,
+                    "reason": reason,
+                    "after_seconds": offset,
+                    "early": early,
+                }
+            )
+        rejecting.sort(key=lambda row: -(row.get("weight") or 0))
+        early_percent = pct(early_weight) if early_known else None
+
+        # What the miner's rejection timer was set to by the early rejections
+        # (0% when there were none): how long it waits before re-proposing.
+        miner_retry: Optional[Dict[str, object]] = None
+        basis = early_percent if early_percent is not None else 0.0
+        timeout = self._miner_retry_timeout(basis)
+        if timeout is not None:
+            miner_retry = {
+                "early_reject_percent": basis,
+                "timeout_seconds": timeout,
+                "expected_ts": state.start_ts + timeout,
+            }
+
+        return {
+            "signature_hash": signature_hash,
+            "block_height": state.block_height,
+            "burn_height": state.burn_height,
+            "start_ts": state.start_ts,
+            "age_seconds": max(0.0, ts - state.start_ts),
+            "phase": self._proposal_phase(state, ts),
+            "phase_durations": phases,
+            "dominant_phase": dominant_phase,
+            "max_percent_observed": state.max_percent,
+            "max_reject_percent": state.max_reject_percent,
+            "reject_reasons": sorted(state.reject_reasons),
+            "pre_commit_weight": state.max_pre_commit_weight or None,
+            "pre_commit_weight_required": state.pre_commit_weight_required,
+            "pre_commit_threshold_ts": pc_done,
+            "signed_ts": signed,
+            "accept_signers": len(state.signers),
+            "reject_signers": len(state.reject_signers),
+            "pre_commit_plateau": plateau,
+            "threshold_crossed_by": [
+                {
+                    "address": address,
+                    "label": self._address_label(address),
+                    "weight": state.pre_commit_weights.get(address),
+                }
+                for address in state.threshold_crossed_by
+                if state.pre_commit_weights.get(address) != 0
+            ],
+            "missing_pre_commit_signers": missing,
+            "rejecting_signers": rejecting[:10],
+            "reject_reason_counts": reason_counts,
+            "early_reject_percent": early_percent,
+            "miner_retry": miner_retry,
+            "reproposals": len(state.reproposal_ts),
+            "first_reproposal_after_seconds": (
+                state.reproposal_ts[0] - state.start_ts if state.reproposal_ts else None
+            ),
+            "no_global_state": state.no_global_state_ts is not None,
+        }
+
     def _proposal_phase(self, state: ProposalState, ts: float) -> Optional[str]:
         """Attribute a stalled proposal's elapsed time to a pipeline phase.
 
@@ -2389,6 +2998,8 @@ class Detector:
         Needs the `Received block pre-commit` signer log for the middle phase;
         without it only local validation can be distinguished.
         """
+        if state.own_pre_commit_ts is None and state.local_reject_ts is not None:
+            return "rejected-locally waited=%.0fs" % (ts - state.local_reject_ts)
         if state.own_pre_commit_ts is None:
             return "awaiting-local-validation waited=%.0fs" % (ts - state.start_ts)
 
@@ -2616,6 +3227,11 @@ class Detector:
         consensus_hash = event.fields.get("consensus_hash")
 
         if isinstance(signer_pubkey, str) and signer_pubkey:
+            if signer_pubkey not in state.reject_details:
+                state.reject_details[signer_pubkey] = {
+                    "reason": reject_reason if isinstance(reject_reason, str) else None,
+                    "ts": event.ts,
+                }
             state.reject_signers.add(signer_pubkey)
             self.seen_signers.add(signer_pubkey)
             if isinstance(signature_weight, int) and signature_weight > 0:
@@ -2829,6 +3445,8 @@ class Detector:
         if state is None:
             self.closed_proposals[signature_hash] = ts
             return alerts
+        for entry in self.active_stall_diagnostics.values():
+            self._refresh_stall_rows(entry, ts, closed=(signature_hash, state))
 
         self.completed_proposals += 1
         if state.threshold_ts is not None:
@@ -4780,6 +5398,7 @@ class Detector:
                 if isinstance(duration, (int, float)):
                     parts.append("after %.0fs" % duration)
                 parts.append("shape=%s" % diagnostics.get("shape", "unknown"))
+                parts.extend(self._stuck_summary_parts(diagnostics))
                 recovered_height = diagnostics.get("recovered_height")
                 if recovered_height is not None:
                     parts.append("height=%s" % recovered_height)
