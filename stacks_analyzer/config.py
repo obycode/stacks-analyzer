@@ -169,6 +169,24 @@ def build_service_config(raw: Optional[Dict[str, Any]]) -> ServiceConfig:
                 "early_rejection_seconds", DetectorConfig.early_rejection_seconds
             )
         ),
+        signer_liveness_window_seconds=int(
+            detector_payload.get(
+                "signer_liveness_window_seconds",
+                DetectorConfig.signer_liveness_window_seconds,
+            )
+        ),
+        offline_weight_percent_threshold=float(
+            detector_payload.get(
+                "offline_weight_percent_threshold",
+                DetectorConfig.offline_weight_percent_threshold,
+            )
+        ),
+        offline_weight_duration_seconds=int(
+            detector_payload.get(
+                "offline_weight_duration_seconds",
+                DetectorConfig.offline_weight_duration_seconds,
+            )
+        ),
     )
 
     telegram_payload = payload.get("telegram", {})

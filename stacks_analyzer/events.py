@@ -111,6 +111,13 @@ SIGNER_PRE_COMMIT_SENT_RE = re.compile(
     r"Broadcasting block pre-commit to stacks node for (?P<hash>[0-9a-f]{64})"
 )
 
+# The sender of a state machine update follows "from signer" rather than being a
+# "key: value" pair. Older signers print a Secp256k1PublicKey debug struct here
+# instead of hex; those updates are simply left unattributed.
+SIGNER_STATE_UPDATE_SENDER_RE = re.compile(
+    r"Received state machine update from signer (?P<pubkey>[0-9a-f]{66})\b"
+)
+
 
 def _extend_timestamp(line: str, name: str) -> Optional[int]:
     raw = extract_field(line, name)
@@ -881,12 +888,16 @@ class LogParser:
                 parent_tenure_last_block_height = extract_field(
                     line, "parent_tenure_last_block_height"
                 )
+                sender_match = SIGNER_STATE_UPDATE_SENDER_RE.search(line)
                 events.append(
                     ParsedEvent(
                         source=source,
                         kind="signer_state_machine_update",
                         ts=ts,
                         fields={
+                            "signer_pubkey": (
+                                sender_match.group("pubkey") if sender_match else None
+                            ),
                             "burn_block": extract_field(line, "burn_block"),
                             "burn_height": (
                                 int(burn_block_height) if burn_block_height else None

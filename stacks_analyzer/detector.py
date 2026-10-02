@@ -93,11 +93,31 @@ class DetectorConfig:
     # Only rejections this soon after the proposal count as the ones that set the
     # miner's retry timer; later ones (e.g. after a new burn block) are a symptom.
     early_rejection_seconds: int = 30
+    # Offline signing power. A signer is live if we saw any message from it
+    # (acceptance, rejection, pre-commit, state machine update) within this window
+    # of the freshest signer message; measuring from the freshest message rather
+    # than the clock keeps a network-wide lull from reading as everyone offline.
+    # Weight that is not live is offline; alert once it stays above the
+    # percentage for the duration.
+    signer_liveness_window_seconds: int = 600
+    offline_weight_percent_threshold: float = 10.0
+    offline_weight_duration_seconds: int = 1200
 
 
 # Stands in for this signer's pubkey (which its logs never state) in
 # `ProposalState.reject_details`.
 LOCAL_SIGNER_KEY = "self"
+
+# Peer signer messages that prove the sender is up.
+SIGNER_LIVENESS_EVENT_KINDS = frozenset(
+    (
+        "signer_block_acceptance",
+        "signer_block_rejection",
+        "signer_block_pre_commit",
+        "signer_block_pre_commit_unknown",
+        "signer_state_machine_update",
+    )
+)
 
 STALL_SHAPE_LABELS = {
     "no_signer_consensus": "Rejected before signers agreed on the chain state",
@@ -376,6 +396,13 @@ class Detector:
         )
         self.total_weight_samples: Deque[int] = deque(maxlen=200)
         self.seen_signers: Set[str] = set()
+        # Latest message of any kind from each signer, for offline-weight tracking.
+        self.signer_last_seen_ts: Dict[str, float] = {}
+        self.first_signer_message_ts: Optional[float] = None
+        # Start of the current run of offline weight above the threshold, and
+        # whether that run has been alerted (so recovery can be announced once).
+        self.offline_weight_since_ts: Optional[float] = None
+        self.offline_weight_alerted = False
         self.signer_participation: Dict[str, Deque[bool]] = defaultdict(
             lambda: deque(maxlen=self.config.large_signer_window)
         )
@@ -439,6 +466,7 @@ class Detector:
         self.event_counts[event.kind] += 1
         self._update_chain_heights(event.fields)
         self._index_hash_height_from_event(event)
+        self._record_signer_liveness(event)
 
         if event.kind == "node_tip_advanced":
             block_metrics = self._apply_confirmed_execution_cost(
@@ -1460,6 +1488,7 @@ class Detector:
         self._detect_proposal_timeouts(ts, alerts)
         self._detect_proposal_delivery_lag(ts, alerts)
         self._detect_large_signer_participation(ts, alerts)
+        self._detect_offline_signing_weight(ts, alerts)
 
         report: Optional[str] = None
         if ts - self.last_report_ts >= self.config.report_interval_seconds:
@@ -3175,6 +3204,137 @@ class Detector:
                     ),
                     ts=ts,
                 )
+
+    def _record_signer_liveness(self, event: ParsedEvent) -> None:
+        if event.kind not in SIGNER_LIVENESS_EVENT_KINDS:
+            return
+        pubkey = event.fields.get("signer_pubkey")
+        if not isinstance(pubkey, str) or not pubkey:
+            # Pre-commits name the signer by address only.
+            address = event.fields.get("signer_address")
+            pubkey = (
+                self.signer_address_to_pubkey.get(address)
+                if isinstance(address, str)
+                else None
+            )
+        if not pubkey:
+            return
+        if self.first_signer_message_ts is None:
+            self.first_signer_message_ts = event.ts
+        previous = self.signer_last_seen_ts.get(pubkey)
+        if previous is None or event.ts > previous:
+            self.signer_last_seen_ts[pubkey] = event.ts
+
+    def _offline_signing_weight(self) -> Optional[Dict[str, object]]:
+        """Weight not heard from within the liveness window of the freshest signer
+        message. Includes weight we never attributed to any signer (the total minus
+        every known signer), so a signer that was already dark when we started still
+        counts."""
+        if not self.signer_last_seen_ts or not self.total_weight_samples:
+            return None
+        total_weight = int(self.total_weight_samples[-1])
+        if total_weight <= 0:
+            return None
+        reference_ts = max(self.signer_last_seen_ts.values())
+        window = self.config.signer_liveness_window_seconds
+        # Until we have listened for a full window, silence proves nothing.
+        if (
+            self.first_signer_message_ts is None
+            or reference_ts - self.first_signer_message_ts < window
+        ):
+            return None
+        online_weight = 0
+        offline: List[Dict[str, object]] = []
+        known = set(self.signer_weight_samples.keys()) | set(self.signer_last_seen_ts)
+        for pubkey in known:
+            samples = self.signer_weight_samples.get(pubkey)
+            # Latest, not median: weights change at reward-cycle boundaries.
+            weight = int(samples[-1]) if samples else self._signer_weight(pubkey)
+            if not isinstance(weight, int) or weight <= 0:
+                continue
+            last_seen = self.signer_last_seen_ts.get(pubkey)
+            if last_seen is not None and reference_ts - last_seen <= window:
+                online_weight += weight
+            else:
+                offline.append(
+                    {"pubkey": pubkey, "weight": weight, "last_seen_ts": last_seen}
+                )
+        offline.sort(key=lambda item: -int(item["weight"]))
+        offline_weight = max(0, total_weight - online_weight)
+        return {
+            "total_weight": total_weight,
+            "offline_weight": offline_weight,
+            "offline_percent": offline_weight * 100.0 / total_weight,
+            "unattributed_weight": max(
+                0, offline_weight - sum(int(item["weight"]) for item in offline)
+            ),
+            "offline_signers": offline,
+            "reference_ts": reference_ts,
+        }
+
+    def _detect_offline_signing_weight(self, ts: float, alerts: List[Alert]) -> None:
+        status = self._offline_signing_weight()
+        if status is None:
+            return
+        percent = float(status["offline_percent"])
+        if percent <= self.config.offline_weight_percent_threshold:
+            if self.offline_weight_alerted:
+                self._emit_alert(
+                    alerts=alerts,
+                    key="signing-power-offline-recovered",
+                    severity="info",
+                    message=(
+                        "Offline signing power back to %.1f%% (%d/%d)"
+                        % (percent, status["offline_weight"], status["total_weight"])
+                    ),
+                    ts=ts,
+                )
+            self.offline_weight_since_ts = None
+            self.offline_weight_alerted = False
+            return
+        if self.offline_weight_since_ts is None:
+            # The weight went quiet a liveness window before we could call it offline.
+            self.offline_weight_since_ts = ts - self.config.signer_liveness_window_seconds
+            return
+        duration = ts - self.offline_weight_since_ts
+        if self.offline_weight_alerted or duration < self.config.offline_weight_duration_seconds:
+            return
+        reference_ts = float(status["reference_ts"])
+        parts = []
+        for item in status["offline_signers"]:
+            last_seen = item["last_seen_ts"]
+            seen = (
+                "last seen %.0fm ago" % ((reference_ts - float(last_seen)) / 60.0)
+                if isinstance(last_seen, float)
+                else "not seen since start"
+            )
+            parts.append(
+                "%s weight %d, %s"
+                % (self._signer_label(str(item["pubkey"])), item["weight"], seen)
+            )
+        if status["unattributed_weight"]:
+            parts.append("%d weight never seen" % status["unattributed_weight"])
+        threshold = self._weight_threshold(int(status["total_weight"]))
+        self._emit_alert(
+            alerts=alerts,
+            key="signing-power-offline",
+            severity="critical",
+            message=(
+                "%.1f%% of signing power offline for %.0fm (%d/%d, %d left vs %d needed): %s"
+                % (
+                    percent,
+                    duration / 60.0,
+                    status["offline_weight"],
+                    status["total_weight"],
+                    int(status["total_weight"]) - int(status["offline_weight"]),
+                    threshold,
+                    "; ".join(parts),
+                )
+            ),
+            ts=ts,
+        )
+        if not self.suppress_alerts:
+            self.offline_weight_alerted = True
 
     def _record_signer_response(
         self,
